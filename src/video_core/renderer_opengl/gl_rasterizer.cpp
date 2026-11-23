@@ -598,20 +598,22 @@ bool RasterizerOpenGL::Draw(bool accelerate, bool is_indexed) {
     }
     state.draw.draw_framebuffer = framebuffer->Handle();
 
-    // Sync the viewport
-    const auto viewport = fb_helper.Viewport();
-    state.viewport.x = static_cast<GLint>(viewport.x);
-    state.viewport.y = static_cast<GLint>(viewport.y);
-    state.viewport.width = static_cast<GLsizei>(viewport.width);
-    state.viewport.height = static_cast<GLsizei>(viewport.height);
-
     // Viewport can have negative offsets or larger dimensions than our framebuffer sub-rect.
     // Enable scissor test to prevent drawing outside of the framebuffer region
-    state.scissor.enabled = true;
-    state.scissor.x = draw_rect.left;
-    state.scissor.y = draw_rect.bottom;
-    state.scissor.width = draw_rect.GetWidth();
-    state.scissor.height = draw_rect.GetHeight();
+    const auto sync_viewport = [this](const VideoCore::ViewportPlacement& placement) {
+        state.viewport.x = static_cast<GLint>(placement.viewport.x);
+        state.viewport.y = static_cast<GLint>(placement.viewport.y);
+        state.viewport.width = static_cast<GLsizei>(placement.viewport.width);
+        state.viewport.height = static_cast<GLsizei>(placement.viewport.height);
+
+        state.scissor.enabled = true;
+        state.scissor.x = placement.draw_rect.left;
+        state.scissor.y = placement.draw_rect.bottom;
+        state.scissor.width = placement.draw_rect.GetWidth();
+        state.scissor.height = placement.draw_rect.GetHeight();
+    };
+    const auto& placements = fb_helper.Placements();
+    sync_viewport(placements.front());
 
     // Update scissor uniforms
     const auto [scissor_x1, scissor_y2, scissor_x2, scissor_y1] = fb_helper.Scissor();
@@ -639,11 +641,18 @@ bool RasterizerOpenGL::Draw(bool accelerate, bool is_indexed) {
     // Sync the uniform data
     UploadUniforms(accelerate);
 
-    // Draw the vertex batch
+    // Draw the vertex batch, once for every place the viewport lands
     bool succeeded = true;
-    if (accelerate) {
-        succeeded = AccelerateDrawBatchInternal(is_indexed);
-    } else {
+    for (const auto& placement : placements) {
+        sync_viewport(placement);
+        if (accelerate) {
+            succeeded = AccelerateDrawBatchInternal(is_indexed);
+            if (!succeeded) {
+                break;
+            }
+            continue;
+        }
+
         state.draw.vertex_array = sw_vao.handle;
         state.draw.vertex_buffer = vertex_buffer.GetHandle();
         curr_shader_manager->UseTrivialVertexShader();

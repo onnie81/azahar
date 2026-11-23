@@ -617,21 +617,23 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
     // Begin rendering
     renderpass_cache.BeginRendering(framebuffer, draw_rect);
 
-    // Configure viewport and scissor
-    const auto viewport = fb_helper.Viewport();
-    pipeline_info.dynamic_info.viewport = Common::Rectangle<s32>{
-        viewport.x,
-        viewport.y,
-        viewport.x + viewport.width,
-        viewport.y + viewport.height,
-    };
-    pipeline_info.dynamic_info.scissor = draw_rect;
-
-    // Draw the vertex batch
+    // Draw the vertex batch, once for every place the viewport lands
     bool succeeded = true;
-    if (accelerate) {
-        succeeded = AccelerateDrawBatchInternal(is_indexed);
-    } else {
+    for (const auto& [viewport, scissor] : fb_helper.Placements()) {
+        // Configure viewport and scissor
+        pipeline_info.dynamic_info.viewport = Common::Rectangle<s32>{
+            viewport.x,
+            viewport.y,
+            viewport.x + viewport.width,
+            viewport.y + viewport.height,
+        };
+        pipeline_info.dynamic_info.scissor = scissor;
+
+        if (accelerate) {
+            succeeded = AccelerateDrawBatchInternal(is_indexed);
+            continue;
+        }
+
         pipeline_cache.BindPipeline(pipeline_info, true);
 
         const u32 vertex_count = static_cast<u32>(vertex_batch.size());
