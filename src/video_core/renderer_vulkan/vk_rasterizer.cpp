@@ -447,6 +447,12 @@ bool RasterizerVulkan::SetupGeometryShader() {
 }
 
 bool RasterizerVulkan::AccelerateDrawBatch(bool is_indexed) {
+    // Triangles on the far edge of a viewport this large are dropped one by one, which takes
+    // their vertices on the CPU
+    if (regs.rasterizer.ViewportHasFarEdge()) {
+        return false;
+    }
+
     if (regs.pipeline.use_gs != Pica::PipelineRegs::UseGS::No) {
         if (regs.pipeline.gs_config.mode != Pica::PipelineRegs::GSMode::Point) {
             return false;

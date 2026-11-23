@@ -176,6 +176,19 @@ void RasterizerSoftware::AddTriangle(const Pica::OutputVertex& v0, const Pica::O
         }
     }
 
+    // Drop the triangle if clipping left a vertex on the far edge of the viewport
+    const f24 halfsize_x = f24::FromRaw(regs.rasterizer.viewport_size_x);
+    const f24 halfsize_y = f24::FromRaw(regs.rasterizer.viewport_size_y);
+    for (const Vertex& vtx : *output_list) {
+        const f24 inv_w = f24::One() / vtx.pos.w;
+        const u16 x = Fix12P4::FromFloat24((vtx.pos.x * inv_w + f24::One()) * halfsize_x);
+        const u16 y = Fix12P4::FromFloat24((vtx.pos.y * inv_w + f24::One()) * halfsize_y);
+        if (x >= RasterizerRegs::ViewportFarEdge << 4 || y >= RasterizerRegs::ViewportFarEdge
+                                                                  << 4) {
+            return;
+        }
+    }
+
     MakeScreenCoords((*output_list)[0]);
     MakeScreenCoords((*output_list)[1]);
 

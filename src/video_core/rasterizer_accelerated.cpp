@@ -2,7 +2,10 @@
 // Licensed under GPLv3 or any later version
 // Refer to the LICENSE.txt file included.
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <boost/container/static_vector.hpp>
 #include "common/alignment.h"
 #include "common/math_util.h"
 #include "core/memory.h"
@@ -83,8 +86,72 @@ static bool AreQuaternionsOpposite(Common::Vec4<f24> qa, Common::Vec4<f24> qb) {
     return (Common::Dot(a, b) < 0.f);
 }
 
+/// Clips the triangle to the view volume and tells whether a vertex ends up on the far edge of
+/// the viewport, see RasterizerRegs::ViewportFarEdge
+static bool HasVertexOnFarEdge(const Pica::RasterizerRegs& regs, const Pica::OutputVertex& v0,
+                               const Pica::OutputVertex& v1, const Pica::OutputVertex& v2) {
+    const auto as_floats = [](const Common::Vec4<f24>& v) {
+        return Common::Vec4f{v.x.ToFloat32(), v.y.ToFloat32(), v.z.ToFloat32(), v.w.ToFloat32()};
+    };
+
+    boost::container::static_vector<Common::Vec4f, 7> planes{
+        {-1.f, 0.f, 0.f, 1.f}, // x = +w
+        {1.f, 0.f, 0.f, 1.f},  // x = -w
+        {0.f, -1.f, 0.f, 1.f}, // y = +w
+        {0.f, 1.f, 0.f, 1.f},  // y = -w
+        {0.f, 0.f, -1.f, 0.f}, // z = 0
+        {0.f, 0.f, 1.f, 1.f},  // z = -w
+    };
+    if (regs.clip_enable) {
+        planes.push_back(as_floats(regs.GetClipCoef()));
+    }
+
+    // Each plane adds at most one vertex
+    boost::container::static_vector<Common::Vec4f, 10> polygon{
+        as_floats(v0.pos),
+        as_floats(v1.pos),
+        as_floats(v2.pos),
+    };
+    boost::container::static_vector<Common::Vec4f, 10> clipped;
+    for (const Common::Vec4f& plane : planes) {
+        clipped.clear();
+        for (std::size_t i = 0; i < polygon.size(); ++i) {
+            const Common::Vec4f& a = polygon[i];
+            const Common::Vec4f& b = polygon[(i + 1) % polygon.size()];
+            const float da = Common::Dot(a, plane);
+            const float db = Common::Dot(b, plane);
+            if (da >= 0.f) {
+                clipped.push_back(a);
+            }
+            if ((da >= 0.f) != (db >= 0.f)) {
+                clipped.push_back(a + (b - a) * (da / (da - db)));
+            }
+        }
+        if (clipped.size() < 3) {
+            return false;
+        }
+        polygon = clipped;
+    }
+
+    // In sixteenths of a pixel, as the software rasterizer rounds positions
+    const float far_edge = static_cast<float>(Pica::RasterizerRegs::ViewportFarEdge) * 16.f;
+    const float half_width = f24::FromRaw(regs.viewport_size_x).ToFloat32();
+    const float half_height = f24::FromRaw(regs.viewport_size_y).ToFloat32();
+    return std::any_of(polygon.begin(), polygon.end(), [&](const Common::Vec4f& vertex) {
+        if (vertex.w <= 0.f) {
+            return false;
+        }
+        return std::round((vertex.x / vertex.w + 1.f) * half_width * 16.f) >= far_edge ||
+               std::round((vertex.y / vertex.w + 1.f) * half_height * 16.f) >= far_edge;
+    });
+}
+
 void RasterizerAccelerated::AddTriangle(const Pica::OutputVertex& v0, const Pica::OutputVertex& v1,
                                         const Pica::OutputVertex& v2) {
+    if (regs.rasterizer.ViewportHasFarEdge() && HasVertexOnFarEdge(regs.rasterizer, v0, v1, v2)) {
+        return;
+    }
+
     vertex_batch.emplace_back(v0, false);
     vertex_batch.emplace_back(v1, AreQuaternionsOpposite(v0.quat, v1.quat));
     vertex_batch.emplace_back(v2, AreQuaternionsOpposite(v0.quat, v2.quat));

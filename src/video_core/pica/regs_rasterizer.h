@@ -82,6 +82,15 @@ struct RasterizerRegs {
         return rects;
     }
 
+    /// A console drops a triangle that, once clipped, has a vertex on the far edge of a viewport
+    /// 1024 wide or tall: a position within the viewport does not reach 1024.
+    static constexpr s32 ViewportFarEdge = 1024;
+
+    bool ViewportHasFarEdge() const {
+        return f24::FromRaw(viewport_size_x).ToFloat32() * 2 >= ViewportFarEdge ||
+               f24::FromRaw(viewport_size_y).ToFloat32() * 2 >= ViewportFarEdge;
+    }
+
     INSERT_PADDING_WORDS(0x1);
 
     BitField<0, 24, u32> viewport_depth_range;      // float24
