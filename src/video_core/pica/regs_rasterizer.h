@@ -5,6 +5,7 @@
 #pragma once
 
 #include <array>
+#include <boost/container/static_vector.hpp>
 #include "common/assert.h"
 #include "common/bit_field.h"
 #include "common/common_funcs.h"
@@ -45,27 +46,40 @@ struct RasterizerRegs {
                 f24::FromRaw(clip_coef[3])};
     }
 
-    /// The corner has ten bits per axis. Past 511 it is a negative offset only while that leaves
-    /// part of the viewport on the framebuffer; otherwise it is a position in the upper half of
-    /// a framebuffer taller or wider than 512.
-    static s32 ViewportOrigin(s32 corner, s32 size, u32 framebuffer_size) {
-        const s32 wrapped = corner + 1024;
-        const bool outside = corner + size <= 0;
-        return outside && wrapped < static_cast<s32>(framebuffer_size) ? wrapped : corner;
-    }
-
-    Common::Rectangle<s32> GetViewportRect(u32 framebuffer_width, u32 framebuffer_height) const {
+    /// The corner has ten bits per axis and is added to a pixel's position modulo 1024, so on each
+    /// axis the viewport can land at the corner and 1024 below it. Returns the places that reach
+    /// the framebuffer, or the corner as written if none does.
+    boost::container::static_vector<Common::Rectangle<s32>, 4> GetViewportRects(
+        u32 framebuffer_width, u32 framebuffer_height) const {
         // These registers hold half-width and half-height, so must be multiplied by 2
         const s32 width = static_cast<s32>(f24::FromRaw(viewport_size_x).ToFloat32() * 2);
         const s32 height = static_cast<s32>(f24::FromRaw(viewport_size_y).ToFloat32() * 2);
-        const s32 x = ViewportOrigin(viewport_corner.x, width, framebuffer_width);
-        const s32 y = ViewportOrigin(viewport_corner.y, height, framebuffer_height);
-        return {
-            x,          // left
-            y + height, // top
-            x + width,  // right
-            y,          // bottom
+        const s32 corner_x = static_cast<s32>(viewport_corner.x);
+        const s32 corner_y = static_cast<s32>(viewport_corner.y);
+        const auto rect_at = [width, height](s32 x, s32 y) {
+            return Common::Rectangle<s32>{
+                x,          // left
+                y + height, // top
+                x + width,  // right
+                y,          // bottom
+            };
         };
+
+        boost::container::static_vector<Common::Rectangle<s32>, 4> rects;
+        for (const s32 y : {corner_y, corner_y - 1024}) {
+            if (y >= static_cast<s32>(framebuffer_height) || y + height <= 0) {
+                continue;
+            }
+            for (const s32 x : {corner_x, corner_x - 1024}) {
+                if (x < static_cast<s32>(framebuffer_width) && x + width > 0) {
+                    rects.push_back(rect_at(x, y));
+                }
+            }
+        }
+        if (rects.empty()) {
+            rects.push_back(rect_at(corner_x, corner_y));
+        }
+        return rects;
     }
 
     INSERT_PADDING_WORDS(0x1);
@@ -153,8 +167,8 @@ struct RasterizerRegs {
     } scissor_test;
 
     union {
-        BitField<0, 10, s32> x;
-        BitField<16, 10, s32> y;
+        BitField<0, 10, u32> x;
+        BitField<16, 10, u32> y;
     } viewport_corner;
 
     INSERT_PADDING_WORDS(0x1);

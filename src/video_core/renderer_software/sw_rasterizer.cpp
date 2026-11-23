@@ -209,11 +209,8 @@ void RasterizerSoftware::MakeScreenCoords(Vertex& vtx) {
     Viewport viewport{};
     viewport.halfsize_x = f24::FromRaw(regs.rasterizer.viewport_size_x);
     viewport.halfsize_y = f24::FromRaw(regs.rasterizer.viewport_size_y);
-    const auto& framebuffer = regs.framebuffer.framebuffer;
-    const auto viewport_rect =
-        regs.rasterizer.GetViewportRect(framebuffer.GetWidth(), framebuffer.GetHeight());
-    viewport.offset_x = f24::FromFloat32(static_cast<f32>(viewport_rect.left));
-    viewport.offset_y = f24::FromFloat32(static_cast<f32>(viewport_rect.bottom));
+    viewport.offset_x = f24::FromFloat32(static_cast<f32>(regs.rasterizer.viewport_corner.x));
+    viewport.offset_y = f24::FromFloat32(static_cast<f32>(regs.rasterizer.viewport_corner.y));
 
     f24 inv_w = f24::One() / vtx.pos.w;
     vtx.pos.w = inv_w;
@@ -277,7 +274,19 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
     const u16 scissor_x2 = static_cast<u16>((regs.rasterizer.scissor_test.x2 + 1) << 4);
     const u16 scissor_y2 = static_cast<u16>((regs.rasterizer.scissor_test.y2 + 1) << 4);
 
-    if (regs.rasterizer.scissor_test.mode == RasterizerRegs::ScissorMode::Include) {
+    const bool scissor_include =
+        regs.rasterizer.scissor_test.mode == RasterizerRegs::ScissorMode::Include;
+    const bool scissor_exclude =
+        regs.rasterizer.scissor_test.mode == RasterizerRegs::ScissorMode::Exclude;
+
+    // The viewport corner is added modulo 1024, so a triangle that reaches past 1023 comes back in
+    // at 0. For such a triangle the scissor box and the framebuffer bounds are checked per pixel.
+    constexpr u16 wrap = 1024 << 4;
+    const bool wraps = max_x > wrap || max_y > wrap;
+    const u16 target_width = static_cast<u16>(regs.framebuffer.framebuffer.GetWidth() << 4);
+    const u16 target_height = static_cast<u16>(regs.framebuffer.framebuffer.GetHeight() << 4);
+
+    if (scissor_include && !wraps) {
         // Calculate the new bounds
         min_x = std::max(min_x, scissor_x1);
         min_y = std::max(min_y, scissor_y1);
@@ -309,12 +318,20 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
     for (u16 y = min_y + 8; y < max_y; y += 0x10) {
         const auto process_scanline = [&, y] {
             for (u16 x = min_x + 8; x < max_x; x += 0x10) {
+                // Where the pixel lands in the framebuffer
+                const u16 fb_x = static_cast<u16>(x % wrap);
+                const u16 fb_y = static_cast<u16>(y % wrap);
+                const bool in_scissor = fb_x >= scissor_x1 && fb_x < scissor_x2 &&
+                                        fb_y >= scissor_y1 && fb_y < scissor_y2;
+                if (wraps && ((scissor_include && !in_scissor) || fb_x >= target_width ||
+                              fb_y >= target_height)) {
+                    continue;
+                }
+
                 // Do not process the pixel if it's inside the scissor box and the scissor mode is
                 // set to Exclude.
-                if (regs.rasterizer.scissor_test.mode == RasterizerRegs::ScissorMode::Exclude) {
-                    if (x >= scissor_x1 && x < scissor_x2 && y >= scissor_y1 && y < scissor_y2) {
-                        continue;
-                    }
+                if (scissor_exclude && in_scissor) {
+                    continue;
                 }
 
                 // Calculate the barycentric coordinates w0, w1 and w2
@@ -451,7 +468,7 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
                     const u32 depth_int = static_cast<u32>(depth * 0xFFFFFF);
                     // Use green color as the shadow intensity
                     const u8 stencil = combiner_output.y;
-                    fb.DrawShadowMapPixel(x >> 4, y >> 4, depth_int, stencil);
+                    fb.DrawShadowMapPixel(fb_x >> 4, fb_y >> 4, depth_int, stencil);
                     // Skip the normal output merger pipeline if it is in shadow mode
                     continue;
                 }
@@ -461,12 +478,12 @@ void RasterizerSoftware::ProcessTriangle(const Vertex& v0, const Vertex& v1, con
                     continue;
                 }
                 WriteFog(depth, combiner_output);
-                if (!DoDepthStencilTest(x, y, depth)) {
+                if (!DoDepthStencilTest(fb_x, fb_y, depth)) {
                     continue;
                 }
-                const auto result = PixelColor(x, y, combiner_output);
+                const auto result = PixelColor(fb_x, fb_y, combiner_output);
                 if (regs.framebuffer.framebuffer.allow_color_write != 0) {
-                    fb.DrawPixel(x >> 4, y >> 4, result);
+                    fb.DrawPixel(fb_x >> 4, fb_y >> 4, result);
                 }
             }
         };
