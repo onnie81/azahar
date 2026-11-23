@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <boost/container/static_vector.hpp>
 #include "common/hash.h"
 #include "common/math_util.h"
 #include "video_core/pica/regs_rasterizer.h"
@@ -19,6 +20,12 @@ struct ViewportInfo {
     s32 y;
     s32 width;
     s32 height;
+};
+
+/// A place where the viewport lands on the framebuffer, and the part of it that is drawn.
+struct ViewportPlacement {
+    ViewportInfo viewport;
+    Common::Rectangle<u32> draw_rect;
 };
 
 struct FramebufferParams {
@@ -71,31 +78,43 @@ public:
         const u32 res_scale = fb->Scale();
         const u32 height = surfaces_rect.GetHeight() / res_scale;
 
-        // Determine the draw rectangle (render area + scissor)
-        Common::Rectangle viewport_rect =
-            regs.GetViewportRect(surfaces_rect.GetWidth() / res_scale, height);
-        if (flip_rect) {
-            viewport_rect = viewport_rect.VerticalMirror(height);
+        // Determine the viewport and the draw rectangle (scissor) of every place it lands
+        for (Common::Rectangle<s32> viewport_rect :
+             regs.GetViewportRects(surfaces_rect.GetWidth() / res_scale, height)) {
+            if (flip_rect) {
+                viewport_rect = viewport_rect.VerticalMirror(height);
+            }
+
+            ViewportPlacement& placement = placements.emplace_back();
+            placement.draw_rect.left = std::clamp<s32>(static_cast<s32>(surfaces_rect.left) +
+                                                           viewport_rect.left * res_scale,
+                                                       surfaces_rect.left, surfaces_rect.right);
+            placement.draw_rect.top = std::clamp<s32>(static_cast<s32>(surfaces_rect.bottom) +
+                                                          viewport_rect.top * res_scale,
+                                                      surfaces_rect.bottom, surfaces_rect.top);
+            placement.draw_rect.right = std::clamp<s32>(static_cast<s32>(surfaces_rect.left) +
+                                                            viewport_rect.right * res_scale,
+                                                        surfaces_rect.left, surfaces_rect.right);
+            placement.draw_rect.bottom = std::clamp<s32>(static_cast<s32>(surfaces_rect.bottom) +
+                                                             viewport_rect.bottom * res_scale,
+                                                         surfaces_rect.bottom, surfaces_rect.top);
+
+            placement.viewport.x =
+                static_cast<s32>(surfaces_rect.left) + viewport_rect.left * res_scale;
+            placement.viewport.y =
+                static_cast<s32>(surfaces_rect.bottom) + viewport_rect.bottom * res_scale;
+            placement.viewport.width = static_cast<s32>(viewport_rect.GetWidth() * res_scale);
+            placement.viewport.height = static_cast<s32>(viewport_rect.GetHeight() * res_scale);
         }
 
-        draw_rect.left =
-            std::clamp<s32>(static_cast<s32>(surfaces_rect.left) + viewport_rect.left * res_scale,
-                            surfaces_rect.left, surfaces_rect.right);
-        draw_rect.top =
-            std::clamp<s32>(static_cast<s32>(surfaces_rect.bottom) + viewport_rect.top * res_scale,
-                            surfaces_rect.bottom, surfaces_rect.top);
-        draw_rect.right =
-            std::clamp<s32>(static_cast<s32>(surfaces_rect.left) + viewport_rect.right * res_scale,
-                            surfaces_rect.left, surfaces_rect.right);
-        draw_rect.bottom = std::clamp<s32>(static_cast<s32>(surfaces_rect.bottom) +
-                                               viewport_rect.bottom * res_scale,
-                                           surfaces_rect.bottom, surfaces_rect.top);
-
-        // Update viewport
-        viewport.x = static_cast<s32>(surfaces_rect.left) + viewport_rect.left * res_scale;
-        viewport.y = static_cast<s32>(surfaces_rect.bottom) + viewport_rect.bottom * res_scale;
-        viewport.width = static_cast<s32>(viewport_rect.GetWidth() * res_scale);
-        viewport.height = static_cast<s32>(viewport_rect.GetHeight() * res_scale);
+        // The render area covers all of them
+        draw_rect = placements.front().draw_rect;
+        for (const ViewportPlacement& placement : placements) {
+            draw_rect.left = std::min(draw_rect.left, placement.draw_rect.left);
+            draw_rect.top = std::max(draw_rect.top, placement.draw_rect.top);
+            draw_rect.right = std::max(draw_rect.right, placement.draw_rect.right);
+            draw_rect.bottom = std::min(draw_rect.bottom, placement.draw_rect.bottom);
+        }
 
         // Scissor checks are window-, not viewport-relative, which means that if the cached texture
         // sub-rect changes, the scissor bounds also need to be updated.
@@ -144,8 +163,9 @@ public:
         return scissor_rect;
     }
 
-    ViewportInfo Viewport() const noexcept {
-        return viewport;
+    /// More than one when the viewport wraps around the framebuffer
+    const boost::container::static_vector<ViewportPlacement, 4>& Placements() const noexcept {
+        return placements;
     }
 
 private:
@@ -153,7 +173,7 @@ private:
     typename T::Framebuffer* fb;
     Common::Rectangle<s32> scissor_rect;
     Common::Rectangle<u32> draw_rect;
-    ViewportInfo viewport;
+    boost::container::static_vector<ViewportPlacement, 4> placements;
 };
 
 } // namespace VideoCore
