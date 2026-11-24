@@ -12,6 +12,7 @@
 #include "common/assert.h"
 #include "common/common_types.h"
 #include "video_core/shader/generator/glsl_shader_decompiler.h"
+#include "video_core/shader/generator/shader_gen.h"
 
 namespace Pica::Shader::Generator::GLSL {
 
@@ -267,10 +268,11 @@ public:
     GLSLGenerator(const std::set<Subroutine>& subroutines, const ProgramCode& program_code,
                   const SwizzleData& swizzle_data, u32 main_offset,
                   const RegGetter& inputreg_getter, const RegGetter& outputreg_getter,
-                  bool sanitize_mul)
+                  bool sanitize_mul, u32 folded_bools)
         : subroutines(subroutines), program_code(program_code), swizzle_data(swizzle_data),
           main_offset(main_offset), inputreg_getter(inputreg_getter),
-          outputreg_getter(outputreg_getter), sanitize_mul(sanitize_mul) {
+          outputreg_getter(outputreg_getter), sanitize_mul(sanitize_mul),
+          folded_bools(folded_bools) {
 
         Generate();
     }
@@ -359,6 +361,10 @@ private:
 
     /// Generates code representing a bool uniform
     std::string GetUniformBool(u32 index, bool invert_test = false) const {
+        if (folded_bools & FOLDED_BOOLS) {
+            const bool value = ((folded_bools >> index) & 1u) != 0u;
+            return value != invert_test ? "true" : "false";
+        }
         return fmt::format("(uniforms.b & {}u) {} 0u", 1 << index, invert_test ? "==" : "!=");
     }
 
@@ -924,18 +930,20 @@ private:
     const RegGetter& inputreg_getter;
     const RegGetter& outputreg_getter;
     const bool sanitize_mul;
+    const u32 folded_bools;
 
     ShaderWriter shader;
 };
 
 std::string DecompileProgram(const ProgramCode& program_code, const SwizzleData& swizzle_data,
                              u32 main_offset, const RegGetter& inputreg_getter,
-                             const RegGetter& outputreg_getter, bool sanitize_mul) {
+                             const RegGetter& outputreg_getter, bool sanitize_mul,
+                             u32 folded_bools) {
 
     try {
         auto subroutines = ControlFlowAnalyzer(program_code, main_offset).MoveSubroutines();
         GLSLGenerator generator(subroutines, program_code, swizzle_data, main_offset,
-                                inputreg_getter, outputreg_getter, sanitize_mul);
+                                inputreg_getter, outputreg_getter, sanitize_mul, folded_bools);
         return generator.MoveShaderCode();
     } catch (const DecompileFail& exception) {
         LOG_INFO(HW_GPU, "Shader decompilation failed: {}", exception.what());
