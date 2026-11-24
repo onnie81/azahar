@@ -96,6 +96,12 @@ struct PicaGSConfigState {
  * This struct contains common information to identify a GLSL vertex shader generated from
  * PICA vertex shader.
  */
+/// Set in PicaVSConfigState::bool_uniforms when the shader is generated for their values
+constexpr u32 FOLDED_BOOLS = 1u << 16;
+
+/// The current values of the bool uniforms the vertex program tests, with FOLDED_BOOLS set
+u32 FoldBoolUniforms(Pica::ShaderSetup& setup);
+
 struct PicaVSConfigState {
     void Init(const Pica::RegsInternal& regs, Pica::ShaderSetup& setup);
 
@@ -103,6 +109,10 @@ struct PicaVSConfigState {
     u64 program_hash;
     u64 swizzle_hash;
     u32 main_offset;
+
+    // FOLDED_BOOLS and the values of the bool uniforms the program tests, or 0 to test them
+    // in the shader
+    u32 bool_uniforms;
 
     u32 num_outputs;
 
@@ -132,8 +142,8 @@ struct PicaVSConfigState {
                                    // fields
                                    FIELD_HASH(lighting_disable), FIELD_HASH(program_hash),
                                    FIELD_HASH(swizzle_hash), FIELD_HASH(main_offset),
-                                   FIELD_HASH(num_outputs), FIELD_HASH(output_map),
-                                   FIELD_HASH(used_input_vertex_attributes),
+                                   FIELD_HASH(bool_uniforms), FIELD_HASH(num_outputs),
+                                   FIELD_HASH(output_map), FIELD_HASH(used_input_vertex_attributes),
                                    FIELD_HASH(input_vertex_attributes), FIELD_HASH(gs_state),
 
                                    // nested layout
