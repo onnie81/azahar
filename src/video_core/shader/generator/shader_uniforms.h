@@ -62,9 +62,15 @@ struct FSUniformData {
     alignas(16) Common::Vec3f tex_lod_bias;
     alignas(16) Common::Vec4f tex_border_color[3];
     alignas(16) Common::Vec4f blend_color;
+    // Fragment interpreter only
+    alignas(16) Common::Vec4u interp_tev[6];
+    alignas(16) Common::Vec4u interp_config;
+    alignas(16) Common::Vec4u interp_lut[2];
+    alignas(16) Common::Vec4f interp_lut_scale[2];
+    alignas(16) Common::Vec4u interp_light[2];
 };
 
-static_assert(sizeof(FSUniformData) == 0x530,
+static_assert(sizeof(FSUniformData) == 0x600,
               "The size of the UniformData does not match the structure in the shader");
 static_assert(sizeof(FSUniformData) < 16384,
               "UniformData structure must be less than 16kb as per the OpenGL spec");
@@ -82,16 +88,28 @@ struct VSUniformData {
     };
     u32 freecam_skip_2d{1};
 #endif
+    // Vertex interpreter only
+    alignas(16) Common::Vec4u interp_config;
+    alignas(16) Common::Vec4u interp_output_map[4];
+    alignas(16) Common::Vec4u interp_semantic_map[6];
+    alignas(16) Common::Vec4u interp_attributes[16];
 };
 #ifdef ENABLE_FREECAM
-static_assert(sizeof(VSUniformData) == 112,
+static_assert(sizeof(VSUniformData) == 544,
               "The size of the VSUniformData does not match the structure in the shader");
 #else
-static_assert(sizeof(VSUniformData) == 32,
+static_assert(sizeof(VSUniformData) == 464,
               "The size of the VSUniformData does not match the structure in the shader");
 #endif
 static_assert(sizeof(VSUniformData) < 16384,
               "VSUniformData structure must be less than 16kb as per the OpenGL spec");
+
+/// Vertex program and swizzle data for the vertex interpreter
+struct VSInterpreterProgram {
+    std::array<u32, 4096> code;
+    std::array<u32, 128> swizzles;
+};
+static_assert(sizeof(VSInterpreterProgram) == 16896);
 
 /**
  * Uniform struct for the Uniform Buffer Object that contains PICA vertex/geometry shader uniforms.

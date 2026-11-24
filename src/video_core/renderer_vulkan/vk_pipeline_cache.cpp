@@ -4,6 +4,7 @@
 
 #include <boost/container/static_vector.hpp>
 
+#include <algorithm>
 #include "common/common_paths.h"
 #include "common/file_util.h"
 #include "common/logging/log.h"
@@ -56,7 +57,7 @@ AttribLoadFlags MakeAttribLoadFlag(Pica::PipelineRegs::VertexAttributeFormat for
     }
 }
 
-constexpr std::array<vk::DescriptorSetLayoutBinding, 6> BUFFER_BINDINGS = {{
+constexpr std::array<vk::DescriptorSetLayoutBinding, 8> BUFFER_BINDINGS = {{
     {0, vk::DescriptorType::eUniformBufferDynamic, 1, vk::ShaderStageFlagBits::eVertex},
     {1, vk::DescriptorType::eUniformBufferDynamic, 1,
      vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eGeometry},
@@ -64,6 +65,9 @@ constexpr std::array<vk::DescriptorSetLayoutBinding, 6> BUFFER_BINDINGS = {{
     {3, vk::DescriptorType::eUniformTexelBuffer, 1, vk::ShaderStageFlagBits::eFragment},
     {4, vk::DescriptorType::eUniformTexelBuffer, 1, vk::ShaderStageFlagBits::eFragment},
     {5, vk::DescriptorType::eUniformTexelBuffer, 1, vk::ShaderStageFlagBits::eFragment},
+    // Vertex interpreter: program and vertex data
+    {6, vk::DescriptorType::eUniformBufferDynamic, 1, vk::ShaderStageFlagBits::eVertex},
+    {7, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eVertex},
 }};
 
 template <u32 NumTex0>
@@ -88,6 +92,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
       update_queue{update_queue_},
       num_worker_threads{std::max(std::thread::hardware_concurrency(), 2U) / 2},
       pipeline_workers{num_worker_threads, "Pipeline workers"},
+      waited_pipeline_workers{num_worker_threads, "Waited pipeline workers"},
       shader_workers{num_worker_threads, "Shader workers"},
       descriptor_heaps{
           DescriptorHeap{instance, scheduler.GetMasterSemaphore(), BUFFER_BINDINGS, 32},
@@ -129,6 +134,28 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     }
 
     BuildLayout();
+
+    for (u32 i = 0; i < fragment_interpreters.size(); i++) {
+        fragment_interpreters[i] = std::make_unique<Shader>(instance);
+        shader_workers.QueueWork([this, i] {
+            Shader& shader = *fragment_interpreters[i];
+            shader.module = Compile(GLSL::GenerateFragmentInterpreter(
+                                        profile, static_cast<GLSL::InterpreterVariant>(i)),
+                                    vk::ShaderStageFlagBits::eFragment, instance.GetDevice());
+            shader.MarkDone();
+        });
+    }
+    for (u32 i = 0; i < vertex_interpreters.size(); i++) {
+        vertex_interpreters[i] = std::make_unique<Shader>(instance);
+        shader_workers.QueueWork([this, i] {
+            Shader& shader = *vertex_interpreters[i];
+            shader.module = Compile(
+                GLSL::GenerateVertexInterpreter(instance.IsShaderClipDistanceSupported(), i != 0),
+                vk::ShaderStageFlagBits::eVertex, instance.GetDevice());
+            shader.MarkDone();
+        });
+    }
+    LoadInterpreterPipelineCache();
 }
 
 void PipelineCache::BuildLayout() {
@@ -148,8 +175,10 @@ void PipelineCache::BuildLayout() {
 
 PipelineCache::~PipelineCache() {
     pipeline_workers.WaitForRequests();
+    waited_pipeline_workers.WaitForRequests();
     shader_workers.WaitForRequests();
     SaveDriverPipelineDiskCache();
+    SaveInterpreterPipelineCache();
 }
 
 void PipelineCache::LoadCache(const std::atomic_bool& stop_loading,
@@ -189,6 +218,7 @@ void PipelineCache::SwitchCache(u64 title_id, const std::atomic_bool& stop_loadi
     // Save current driver cache, if one was loaded, update program ID and load the new driver cache
     if (curr_disk_cache) {
         SaveDriverPipelineDiskCache();
+        SaveInterpreterPipelineCache();
     }
     SetProgramID(title_id);
     LoadDriverPipelineDiskCache(stop_loading, nullptr);
@@ -621,6 +651,75 @@ void PipelineCache::UseFragmentShader(const Pica::RegsInternal& regs,
         current_shaders[ProgramType::FS] = (*res).second;
         shader_hashes[ProgramType::FS] = (*res).first;
     }
+}
+
+void PipelineCache::UseFragmentInterpreter(u32 variant) {
+    current_shaders[ProgramType::FS] = fragment_interpreters[variant].get();
+    shader_hashes[ProgramType::FS] = FRAGMENT_INTERPRETER_ID + variant;
+}
+
+bool PipelineCache::InterpretersFailed() {
+    const auto failed = [](const std::unique_ptr<Shader>& shader) {
+        return shader->IsDone() && !shader->Handle();
+    };
+    return std::ranges::any_of(fragment_interpreters, failed) ||
+           std::ranges::any_of(vertex_interpreters, failed);
+}
+
+std::string PipelineCache::GetInterpreterPipelineCachePath() const {
+    return fmt::format("{}interpreters-{:X}{:X}.bin", GetPipelineCacheDir(), instance.GetVendorID(),
+                       instance.GetDeviceID());
+}
+
+void PipelineCache::LoadInterpreterPipelineCache() {
+    std::vector<u8> data;
+    if (Settings::values.use_disk_shader_cache && EnsureDirectories()) {
+        FileUtil::IOFile file{GetInterpreterPipelineCachePath(), "rb"};
+        if (file.IsOpen()) {
+            data.resize(file.GetSize());
+            if (file.ReadBytes(data.data(), data.size()) != data.size() || !IsCacheValid(data)) {
+                data.clear();
+            }
+        }
+    }
+
+    const vk::Device device = instance.GetDevice();
+    vk::PipelineCacheCreateInfo cache_info{
+        .initialDataSize = data.size(),
+        .pInitialData = data.data(),
+    };
+    try {
+        interpreter_pipeline_cache = device.createPipelineCacheUnique(cache_info);
+    } catch (const vk::SystemError& err) {
+        LOG_ERROR(Render_Vulkan, "Failed to create the interpreter pipeline cache: {}", err.what());
+        interpreter_pipeline_cache = device.createPipelineCacheUnique({});
+    }
+}
+
+void PipelineCache::SaveInterpreterPipelineCache() {
+    if (!Settings::values.use_disk_shader_cache || !interpreter_pipeline_cache ||
+        !EnsureDirectories()) {
+        return;
+    }
+    const auto data = instance.GetDevice().getPipelineCacheData(*interpreter_pipeline_cache);
+    FileUtil::IOFile file{GetInterpreterPipelineCachePath(), "wb"};
+    if (!file.IsOpen() || file.WriteBytes(data.data(), data.size()) != data.size()) {
+        LOG_ERROR(Render_Vulkan, "Error during interpreter pipeline cache write");
+    }
+}
+
+void PipelineCache::UseVertexInterpreter() {
+    current_shaders[ProgramType::VS] = vertex_interpreters[profile.enable_accurate_mul].get();
+    shader_hashes[ProgramType::VS] = VERTEX_INTERPRETER_ID + profile.enable_accurate_mul;
+    UseTrivialGeometryShader();
+}
+
+bool PipelineCache::IsPipelineReady(PipelineInfo& info, bool prioritize) {
+    for (u32 i = 0; i < MAX_SHADER_STAGES; i++) {
+        info.state.shader_ids[i] = shader_hashes[i];
+    }
+    GraphicsPipeline* const pipeline = curr_disk_cache->GetPipeline(info);
+    return pipeline->IsDone() || (pipeline->TryBuild(false, prioritize) && pipeline->IsDone());
 }
 
 void PipelineCache::QueryBlendEmulation(const Pica::RegsInternal& regs, bool& rgb_emulation,

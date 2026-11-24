@@ -1771,4 +1771,914 @@ std::string GenerateFragmentShader(const FSConfig& config, const UserConfig& use
     return module.Generate();
 }
 
+std::optional<InterpreterVariant> FragmentInterpreterVariant(const FSConfig& fs_config,
+                                                             const UserConfig& user,
+                                                             const Profile& profile) {
+    using LogicOp = Pica::FramebufferRegs::LogicOp;
+    FSConfig config = fs_config;
+    config.ApplyProfile(profile);
+
+    const auto logic_op = config.framebuffer.logic_op.Value();
+    if (logic_op != LogicOp::Copy && logic_op != LogicOp::NoOp && logic_op != LogicOp::Clear &&
+        logic_op != LogicOp::Set) {
+        return std::nullopt;
+    }
+    if (config.framebuffer.requested_rgb_blend.RequiresMinMaxEmulation() ||
+        config.framebuffer.requested_alpha_blend.RequiresMinMaxEmulation() ||
+        config.texture.fog_mode == TexturingRegs::FogMode::Gas || config.proctex.enable ||
+        user.use_custom_normal) {
+        return std::nullopt;
+    }
+
+    const bool shadow_rendering = config.framebuffer.shadow_rendering;
+    switch (config.texture.texture0_type.Value()) {
+    case TextureType::Texture2D:
+    case TextureType::Projection2D:
+    case TextureType::Disabled:
+        return shadow_rendering ? InterpreterVariant::ShadowRendering
+                                : InterpreterVariant::Texture2D;
+    case TextureType::TextureCube:
+        if (shadow_rendering) {
+            return std::nullopt;
+        }
+        return InterpreterVariant::TextureCube;
+    case TextureType::Shadow2D:
+        if (shadow_rendering) {
+            return std::nullopt;
+        }
+        return InterpreterVariant::Shadow2D;
+    default:
+        return std::nullopt;
+    }
+}
+
+void PackFragmentInterpreterConfig(const FSConfig& fs_config, const Profile& profile,
+                                   FSUniformData& data) {
+    using Stage = Pica::TexturingRegs::TevStageConfig;
+    using Sampler = LightingRegs::LightingSampler;
+    FSConfig config = fs_config;
+    config.ApplyProfile(profile);
+
+    for (u32 i = 0; i < config.texture.tev_stages.size(); i++) {
+        const Stage stage = config.texture.tev_stages[i];
+        // Stage 0 has no previous stage, Previous means source 3 there
+        const auto color = [&](Stage::Source source) {
+            const bool third = i == 0 && source == Stage::Source::Previous;
+            return static_cast<u32>(third ? stage.color_source3.Value() : source);
+        };
+        const auto alpha = [&](Stage::Source source) {
+            const bool third = i == 0 && source == Stage::Source::Previous;
+            return static_cast<u32>(third ? stage.alpha_source3.Value() : source);
+        };
+        data.interp_tev[i] = {
+            color(stage.color_source1) | color(stage.color_source2) << 4 |
+                color(stage.color_source3) << 8 | alpha(stage.alpha_source1) << 12 |
+                alpha(stage.alpha_source2) << 16 | alpha(stage.alpha_source3) << 20,
+            static_cast<u32>(stage.color_modifier1.Value()) |
+                static_cast<u32>(stage.color_modifier2.Value()) << 4 |
+                static_cast<u32>(stage.color_modifier3.Value()) << 8 |
+                static_cast<u32>(stage.alpha_modifier1.Value()) << 12 |
+                static_cast<u32>(stage.alpha_modifier2.Value()) << 16 |
+                static_cast<u32>(stage.alpha_modifier3.Value()) << 20,
+            static_cast<u32>(stage.color_op.Value()) |
+                static_cast<u32>(stage.alpha_op.Value()) << 4 | stage.GetColorMultiplier() << 8 |
+                stage.GetAlphaMultiplier() << 12 |
+                static_cast<u32>(!IsPassThroughTevStage(stage)) << 16 |
+                static_cast<u32>(config.TevStageUpdatesCombinerBufferColor(i)) << 17 |
+                static_cast<u32>(config.TevStageUpdatesCombinerBufferAlpha(i)) << 18,
+            0u,
+        };
+    }
+
+    u32 border = 0;
+    for (u32 i = 0; i < 3; i++) {
+        border |= config.texture.texture_border_color[i].enable_s << (i * 2);
+        border |= config.texture.texture_border_color[i].enable_t << (i * 2 + 1);
+    }
+    const auto& lighting = config.lighting;
+    data.interp_config = {
+        static_cast<u32>(config.framebuffer.alpha_test_func.Value()) |
+            static_cast<u32>(config.framebuffer.scissor_test_mode.Value()) << 4 |
+            static_cast<u32>(config.framebuffer.depthmap_enable ==
+                             RasterizerRegs::DepthBuffering::WBuffering)
+                << 8 |
+            static_cast<u32>(config.framebuffer.logic_op.Value()) << 12,
+        static_cast<u32>(config.texture.texture0_type.Value()) |
+            config.texture.texture2_use_coord1 << 4 |
+            static_cast<u32>(config.texture.fog_mode.Value()) << 8 | config.texture.fog_flip << 12 |
+            config.texture.shadow_texture_orthographic << 13 | border << 16,
+        lighting.enable | lighting.src_num << 1 | lighting.clamp_highlights << 5 |
+            static_cast<u32>(lighting.config.Value()) << 6 | lighting.enable_primary_alpha << 10 |
+            lighting.enable_secondary_alpha << 11 |
+            static_cast<u32>(lighting.bump_mode.Value()) << 12 | lighting.bump_selector << 14 |
+            lighting.bump_renorm << 16 | lighting.enable_shadow << 17 |
+            lighting.shadow_primary << 18 | lighting.shadow_secondary << 19 |
+            lighting.shadow_invert << 20 | lighting.shadow_alpha << 21 |
+            lighting.shadow_selector << 22,
+        0u,
+    };
+
+    const auto lut = [&](const LutConfig& lut_config, bool enable, Sampler sampler) {
+        const bool usable =
+            enable && LightingRegs::IsLightingSamplerSupported(lighting.config, sampler);
+        return static_cast<u32>(usable) | lut_config.abs_input << 1 |
+               static_cast<u32>(lut_config.type.Value()) << 2;
+    };
+    // lut_sp has no global enable, each light has its own
+    data.interp_lut[0] = {
+        lut(lighting.lut_d0, lighting.lut_d0.enable, Sampler::Distribution0),
+        lut(lighting.lut_d1, lighting.lut_d1.enable, Sampler::Distribution1),
+        lut(lighting.lut_sp, true, Sampler::SpotlightAttenuation),
+        lut(lighting.lut_fr, lighting.lut_fr.enable, Sampler::Fresnel),
+    };
+    data.interp_lut[1] = {
+        lut(lighting.lut_rr, lighting.lut_rr.enable, Sampler::ReflectRed),
+        lut(lighting.lut_rg, lighting.lut_rg.enable, Sampler::ReflectGreen),
+        lut(lighting.lut_rb, lighting.lut_rb.enable, Sampler::ReflectBlue),
+        0u,
+    };
+    data.interp_lut_scale[0] = {lighting.lut_d0.GetScale(), lighting.lut_d1.GetScale(),
+                                lighting.lut_sp.GetScale(), lighting.lut_fr.GetScale()};
+    data.interp_lut_scale[1] = {lighting.lut_rr.GetScale(), lighting.lut_rg.GetScale(),
+                                lighting.lut_rb.GetScale(), 0.f};
+
+    for (u32 i = 0; i < lighting.lights.size(); i++) {
+        const auto& light = lighting.lights[i];
+        data.interp_light[i / 4][i % 4] =
+            light.num | light.directional << 3 | light.two_sided_diffuse << 4 |
+            light.dist_atten_enable << 5 | light.spot_atten_enable << 6 |
+            light.geometric_factor_0 << 7 | light.geometric_factor_1 << 8 |
+            light.shadow_enable << 9;
+    }
+}
+
+std::string GenerateFragmentInterpreter(const Profile& profile, InterpreterVariant variant) {
+    using Stage = Pica::TexturingRegs::TevStageConfig;
+    using CompareFunc = Pica::FramebufferRegs::CompareFunc;
+    using ScissorMode = RasterizerRegs::ScissorMode;
+    using LutInput = LightingRegs::LightingLutInput;
+    using Sampler = LightingRegs::LightingSampler;
+
+    std::string out;
+    out += "#extension GL_ARB_separate_shader_objects : enable\n";
+    if (profile.has_fragment_shader_barycentric) {
+        out += "#extension GL_EXT_fragment_shader_barycentric : enable\n"
+               "#define pervertex pervertexEXT\n"
+               "#define gl_BaryCoord gl_BaryCoordEXT\n"
+               "#define USE_BARYCENTRIC 1\n";
+    } else {
+        out += "#define USE_BARYCENTRIC 0\n";
+    }
+    const bool shadow_rendering = variant == InterpreterVariant::ShadowRendering;
+    const bool interlock = shadow_rendering && profile.has_fragment_shader_interlock;
+    if (interlock) {
+        out += "#extension GL_ARB_fragment_shader_interlock : enable\n"
+               "#define beginInvocationInterlock beginInvocationInterlockARB\n"
+               "#define endInvocationInterlock endInvocationInterlockARB\n";
+    }
+    out += fmt::format("#define TEXTURE_CUBE {}\n#define SHADOW_2D {}\n"
+                       "#define SHADOW_RENDERING {}\n#define USE_INTERLOCK {}\n",
+                       static_cast<u32>(variant == InterpreterVariant::TextureCube),
+                       static_cast<u32>(variant == InterpreterVariant::Shadow2D),
+                       static_cast<u32>(shadow_rendering), static_cast<u32>(interlock));
+
+    const auto define = [&out](std::string_view name, auto value) {
+        out += fmt::format("#define {} {}u\n", name, static_cast<u32>(value));
+    };
+    define("SRC_PRIMARY_COLOR", Stage::Source::PrimaryColor);
+    define("SRC_PRIMARY_FRAGMENT_COLOR", Stage::Source::PrimaryFragmentColor);
+    define("SRC_SECONDARY_FRAGMENT_COLOR", Stage::Source::SecondaryFragmentColor);
+    define("SRC_TEXTURE0", Stage::Source::Texture0);
+    define("SRC_TEXTURE1", Stage::Source::Texture1);
+    define("SRC_TEXTURE2", Stage::Source::Texture2);
+    define("SRC_TEXTURE3", Stage::Source::Texture3);
+    define("SRC_PREVIOUS_BUFFER", Stage::Source::PreviousBuffer);
+    define("SRC_CONSTANT", Stage::Source::Constant);
+    define("SRC_PREVIOUS", Stage::Source::Previous);
+    define("CMOD_COLOR", Stage::ColorModifier::SourceColor);
+    define("CMOD_INV_COLOR", Stage::ColorModifier::OneMinusSourceColor);
+    define("CMOD_ALPHA", Stage::ColorModifier::SourceAlpha);
+    define("CMOD_INV_ALPHA", Stage::ColorModifier::OneMinusSourceAlpha);
+    define("CMOD_RED", Stage::ColorModifier::SourceRed);
+    define("CMOD_INV_RED", Stage::ColorModifier::OneMinusSourceRed);
+    define("CMOD_GREEN", Stage::ColorModifier::SourceGreen);
+    define("CMOD_INV_GREEN", Stage::ColorModifier::OneMinusSourceGreen);
+    define("CMOD_BLUE", Stage::ColorModifier::SourceBlue);
+    define("CMOD_INV_BLUE", Stage::ColorModifier::OneMinusSourceBlue);
+    define("AMOD_ALPHA", Stage::AlphaModifier::SourceAlpha);
+    define("AMOD_INV_ALPHA", Stage::AlphaModifier::OneMinusSourceAlpha);
+    define("AMOD_RED", Stage::AlphaModifier::SourceRed);
+    define("AMOD_INV_RED", Stage::AlphaModifier::OneMinusSourceRed);
+    define("AMOD_GREEN", Stage::AlphaModifier::SourceGreen);
+    define("AMOD_INV_GREEN", Stage::AlphaModifier::OneMinusSourceGreen);
+    define("AMOD_BLUE", Stage::AlphaModifier::SourceBlue);
+    define("AMOD_INV_BLUE", Stage::AlphaModifier::OneMinusSourceBlue);
+    define("OP_REPLACE", Stage::Operation::Replace);
+    define("OP_MODULATE", Stage::Operation::Modulate);
+    define("OP_ADD", Stage::Operation::Add);
+    define("OP_ADD_SIGNED", Stage::Operation::AddSigned);
+    define("OP_LERP", Stage::Operation::Lerp);
+    define("OP_SUBTRACT", Stage::Operation::Subtract);
+    define("OP_DOT3_RGB", Stage::Operation::Dot3_RGB);
+    define("OP_DOT3_RGBA", Stage::Operation::Dot3_RGBA);
+    define("OP_MULTIPLY_THEN_ADD", Stage::Operation::MultiplyThenAdd);
+    define("OP_ADD_THEN_MULTIPLY", Stage::Operation::AddThenMultiply);
+    define("CMP_NEVER", CompareFunc::Never);
+    define("CMP_ALWAYS", CompareFunc::Always);
+    define("CMP_EQUAL", CompareFunc::Equal);
+    define("CMP_NOT_EQUAL", CompareFunc::NotEqual);
+    define("CMP_LESS", CompareFunc::LessThan);
+    define("CMP_LESS_EQUAL", CompareFunc::LessThanOrEqual);
+    define("CMP_GREATER", CompareFunc::GreaterThan);
+    define("CMP_GREATER_EQUAL", CompareFunc::GreaterThanOrEqual);
+    define("SCISSOR_EXCLUDE", ScissorMode::Exclude);
+    define("SCISSOR_INCLUDE", ScissorMode::Include);
+    define("TEX_PROJECTION_2D", TextureType::Projection2D);
+    define("TEX_DISABLED", TextureType::Disabled);
+    define("FOG_ENABLED", TexturingRegs::FogMode::Fog);
+    define("LOGIC_CLEAR", Pica::FramebufferRegs::LogicOp::Clear);
+    define("LOGIC_SET", Pica::FramebufferRegs::LogicOp::Set);
+    define("LUT_IN_NH", LutInput::NH);
+    define("LUT_IN_VH", LutInput::VH);
+    define("LUT_IN_NV", LutInput::NV);
+    define("LUT_IN_LN", LutInput::LN);
+    define("LUT_IN_SP", LutInput::SP);
+    define("LUT_IN_CP", LutInput::CP);
+    define("LIGHTING_CONFIG_7", LightingRegs::LightingConfig::Config7);
+    define("BUMP_NORMAL_MAP", LightingRegs::LightingBumpMode::NormalMap);
+    define("BUMP_TANGENT_MAP", LightingRegs::LightingBumpMode::TangentMap);
+    const auto sampler = [&out](std::string_view name, Sampler value) {
+        out += fmt::format("#define {} {}\n", name, static_cast<u32>(value));
+    };
+    sampler("LUT_D0", Sampler::Distribution0);
+    sampler("LUT_D1", Sampler::Distribution1);
+    sampler("LUT_FR", Sampler::Fresnel);
+    sampler("LUT_RB", Sampler::ReflectBlue);
+    sampler("LUT_RG", Sampler::ReflectGreen);
+    sampler("LUT_RR", Sampler::ReflectRed);
+    sampler("LUT_SP", Sampler::SpotlightAttenuation);
+    sampler("LUT_DA", Sampler::DistanceAttenuation);
+
+    const auto input = [&out](std::string_view var, Semantic location) {
+        out += fmt::format("layout (location = {}) in {};\n", static_cast<u32>(location), var);
+    };
+    input("vec4 primary_color", Semantic::Color);
+    input("vec2 texcoord0", Semantic::Texcoord0);
+    input("vec2 texcoord1", Semantic::Texcoord1);
+    input("vec2 texcoord2", Semantic::Texcoord2);
+    input("float texcoord0_w", Semantic::Texcoord0_W);
+    if (profile.has_fragment_shader_barycentric) {
+        input("pervertex vec4 normquats[]", Semantic::Normquat);
+    } else {
+        input("vec4 normquat", Semantic::Normquat);
+    }
+    input("vec3 view", Semantic::View);
+    out += "layout (location = 0) out vec4 color;\n";
+
+    // Regular fs uniform block plus the interpreter fields
+    std::string block{FSUniformBlockDef};
+    block.replace(block.rfind("};"), 2,
+                  "    uvec4 interp_tev[NUM_TEV_STAGES];\n"
+                  "    uvec4 interp_config;\n"
+                  "    uvec4 interp_lut[2];\n"
+                  "    vec4 interp_lut_scale[2];\n"
+                  "    uvec4 interp_light[2];\n"
+                  "};");
+    out += block;
+    out += "layout(set = 0, binding = 3) uniform samplerBuffer texture_buffer_lut_lf;\n"
+           "layout(set = 0, binding = 4) uniform samplerBuffer texture_buffer_lut_rg;\n"
+           "layout(set = 0, binding = 5) uniform samplerBuffer texture_buffer_lut_rgba;\n";
+    const std::string_view tex0 = variant == InterpreterVariant::Shadow2D      ? "usampler2D"
+                                  : variant == InterpreterVariant::TextureCube ? "samplerCube"
+                                                                               : "sampler2D";
+    out += fmt::format("layout(set = 1, binding = 0) uniform {} tex0;\n", tex0);
+    out += "layout(set = 1, binding = 1) uniform sampler2D tex1;\n"
+           "layout(set = 1, binding = 2) uniform sampler2D tex2;\n";
+    if (shadow_rendering) {
+        out += "layout(set = 2, binding = 0, r32ui) uniform uimage2D shadow_buffer;\n";
+    }
+
+    out += R"glsl(
+vec3 quaternion_rotate(vec4 q, vec3 v) {
+    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
+}
+
+float byteround(float x) {
+    return round(x * 255.0) * (1.0 / 255.0);
+}
+
+vec3 byteround(vec3 x) {
+    return round(x * 255.0) * (1.0 / 255.0);
+}
+
+vec4 byteround(vec4 x) {
+    return round(x * 255.0) * (1.0 / 255.0);
+}
+
+float getLod(vec2 coord) {
+    vec2 d = max(abs(dFdx(coord)), abs(dFdy(coord)));
+    return log2(max(d.x, d.y));
+}
+
+float LookupLightingLUT(int lut_index, int index, float delta) {
+    vec2 entry = texelFetch(texture_buffer_lut_lf, lighting_lut_offset[lut_index >> 2][lut_index & 3] + index).rg;
+    return entry.r + entry.g * delta;
+}
+
+float LookupLightingLUTUnsigned(int lut_index, float pos) {
+    int index = int(clamp(floor(pos * 256.0), 0.f, 255.f));
+    float delta = pos * 256.0 - float(index);
+    return LookupLightingLUT(lut_index, index, delta);
+}
+
+float LookupLightingLUTSigned(int lut_index, float pos) {
+    int index = int(clamp(floor(pos * 128.0), -128.f, 127.f));
+    float delta = pos * 128.0 - float(index);
+    if (index < 0) index += 256;
+    return LookupLightingLUT(lut_index, index, delta);
+}
+
+bool AreQuaternionsOpposite(vec4 qa, vec4 qb) {
+    return (dot(qa, qb) < 0.0);
+}
+
+uint bits(uint word, uint shift, uint count) {
+    return (word >> shift) & ((1u << count) - 1u);
+}
+
+#if SHADOW_2D || SHADOW_RENDERING
+uvec2 DecodeShadow(uint pixel) {
+    return uvec2(pixel >> 8, pixel & 0xFFu);
+}
+#endif
+
+#if SHADOW_2D
+float CompareShadow(uint pixel, uint z) {
+    uvec2 p = DecodeShadow(pixel);
+    return mix(float(p.y) * (1.0 / 255.0), 0.0, p.x <= z);
+}
+
+float mix2(vec4 s, vec2 a) {
+    vec2 t = mix(s.xy, s.zw, a.yy);
+    return mix(t.x, t.y, a.x);
+}
+
+float SampleShadow2D(ivec2 uv, uint z) {
+    if (any(bvec4(lessThan(uv, ivec2(0)), greaterThanEqual(uv, textureSize(tex0, 0)))))
+        return 1.0;
+    return CompareShadow(texelFetch(tex0, uv, 0).x, z);
+}
+
+vec4 shadowTexture(vec2 uv, float w, bool orthographic) {
+    if (!orthographic) {
+        uv /= w;
+    }
+    uint z = uint(max(0, int(min(abs(w), 1.0) * float(0xFFFFFF)) - shadow_texture_bias));
+    vec2 coord = vec2(textureSize(tex0, 0)) * uv - vec2(0.5);
+    vec2 coord_floor = floor(coord);
+    vec2 f = coord - coord_floor;
+    ivec2 i = ivec2(coord_floor);
+    vec4 s = vec4(
+        SampleShadow2D(i              , z),
+        SampleShadow2D(i + ivec2(1, 0), z),
+        SampleShadow2D(i + ivec2(0, 1), z),
+        SampleShadow2D(i + ivec2(1, 1), z));
+    return vec4(mix2(s, f));
+}
+#endif
+
+#if SHADOW_RENDERING
+uint EncodeShadow(uvec2 pixel) {
+    return (pixel.x << 8) | pixel.y;
+}
+
+uint UpdateShadow(uint pixel, uint d, uint s) {
+    uvec2 ref = DecodeShadow(pixel);
+    if (d < ref.x) {
+        if (s == 0u) {
+            ref.x = d;
+        } else {
+            s = uint(float(s) / (shadow_bias_constant + shadow_bias_linear * float(d) / float(ref.x)));
+            ref.y = min(s, ref.y);
+        }
+    }
+    return EncodeShadow(ref);
+}
+#endif
+
+bool flag(uint word, uint bit) {
+    return ((word >> bit) & 1u) != 0u;
+}
+
+vec4 rounded_primary_color;
+vec4 primary_fragment_color;
+vec4 secondary_fragment_color;
+vec4 tex_color[4];
+vec4 combiner_buffer;
+vec4 combiner_output;
+
+vec4 tevSource(uint source, uint stage) {
+    switch (source) {
+    case SRC_PRIMARY_COLOR:
+        return rounded_primary_color;
+    case SRC_PRIMARY_FRAGMENT_COLOR:
+        return primary_fragment_color;
+    case SRC_SECONDARY_FRAGMENT_COLOR:
+        return secondary_fragment_color;
+    case SRC_TEXTURE0:
+        return tex_color[0];
+    case SRC_TEXTURE1:
+        return tex_color[1];
+    case SRC_TEXTURE2:
+        return tex_color[2];
+    case SRC_TEXTURE3:
+        return tex_color[3];
+    case SRC_PREVIOUS_BUFFER:
+        return combiner_buffer;
+    case SRC_CONSTANT:
+        return const_color[stage];
+    case SRC_PREVIOUS:
+        return combiner_output;
+    default:
+        return vec4(0.0);
+    }
+}
+
+vec3 colorModifier(uint modifier, vec4 source) {
+    switch (modifier) {
+    case CMOD_COLOR:
+        return source.rgb;
+    case CMOD_INV_COLOR:
+        return vec3(1.0) - source.rgb;
+    case CMOD_ALPHA:
+        return source.aaa;
+    case CMOD_INV_ALPHA:
+        return vec3(1.0) - source.aaa;
+    case CMOD_RED:
+        return source.rrr;
+    case CMOD_INV_RED:
+        return vec3(1.0) - source.rrr;
+    case CMOD_GREEN:
+        return source.ggg;
+    case CMOD_INV_GREEN:
+        return vec3(1.0) - source.ggg;
+    case CMOD_BLUE:
+        return source.bbb;
+    case CMOD_INV_BLUE:
+        return vec3(1.0) - source.bbb;
+    default:
+        return vec3(0.0);
+    }
+}
+
+float alphaModifier(uint modifier, vec4 source) {
+    switch (modifier) {
+    case AMOD_ALPHA:
+        return source.a;
+    case AMOD_INV_ALPHA:
+        return 1.0 - source.a;
+    case AMOD_RED:
+        return source.r;
+    case AMOD_INV_RED:
+        return 1.0 - source.r;
+    case AMOD_GREEN:
+        return source.g;
+    case AMOD_INV_GREEN:
+        return 1.0 - source.g;
+    case AMOD_BLUE:
+        return source.b;
+    case AMOD_INV_BLUE:
+        return 1.0 - source.b;
+    default:
+        return 0.0;
+    }
+}
+
+vec3 colorCombiner(uint op, vec3 a, vec3 b, vec3 c) {
+    vec3 result;
+    switch (op) {
+    case OP_REPLACE:
+        result = a;
+        break;
+    case OP_MODULATE:
+        result = a * b;
+        break;
+    case OP_ADD:
+        result = a + b;
+        break;
+    case OP_ADD_SIGNED:
+        result = a + b - vec3(0.5);
+        break;
+    case OP_LERP:
+        result = mix(b, a, c);
+        break;
+    case OP_SUBTRACT:
+        result = a - b;
+        break;
+    case OP_MULTIPLY_THEN_ADD:
+        result = fma(a, b, c);
+        break;
+    case OP_ADD_THEN_MULTIPLY:
+        result = min(a + b, vec3(1.0)) * c;
+        break;
+    case OP_DOT3_RGB:
+    case OP_DOT3_RGBA:
+        result = vec3(dot(a - vec3(0.5), b - vec3(0.5)) * 4.0);
+        break;
+    default:
+        result = vec3(0.0);
+        break;
+    }
+    return clamp(result, vec3(0.0), vec3(1.0));
+}
+
+float alphaCombiner(uint op, float a, float b, float c) {
+    float result;
+    switch (op) {
+    case OP_REPLACE:
+        result = a;
+        break;
+    case OP_MODULATE:
+        result = a * b;
+        break;
+    case OP_ADD:
+        result = a + b;
+        break;
+    case OP_ADD_SIGNED:
+        result = a + b - 0.5;
+        break;
+    case OP_LERP:
+        result = mix(b, a, c);
+        break;
+    case OP_SUBTRACT:
+        result = a - b;
+        break;
+    case OP_MULTIPLY_THEN_ADD:
+        result = fma(a, b, c);
+        break;
+    case OP_ADD_THEN_MULTIPLY:
+        result = min(a + b, 1.0) * c;
+        break;
+    default:
+        result = 0.0;
+        break;
+    }
+    return clamp(result, 0.0, 1.0);
+}
+
+// Input of a lighting LUT
+float lutInput(uint type, bool config_7, vec3 normal, vec3 tangent, vec3 light_vector,
+               vec3 half_vector, vec3 spot_dir) {
+    switch (type) {
+    case LUT_IN_NH:
+        return dot(normal, normalize(half_vector));
+    case LUT_IN_VH:
+        return dot(normalize(view), normalize(half_vector));
+    case LUT_IN_NV:
+        return dot(normal, normalize(view));
+    case LUT_IN_LN:
+        return dot(light_vector, normal);
+    case LUT_IN_SP:
+        return dot(light_vector, spot_dir);
+    case LUT_IN_CP:
+        if (config_7) {
+            return dot(normalize(half_vector) - normal * dot(normal, normalize(half_vector)), tangent);
+        }
+        return 0.0;
+    default:
+        return 0.0;
+    }
+}
+
+float lutValue(int lut_index, uint lut, bool two_sided, bool config_7, vec3 normal, vec3 tangent,
+               vec3 light_vector, vec3 half_vector, vec3 spot_dir) {
+    float index = lutInput(bits(lut, 2u, 3u), config_7, normal, tangent, light_vector, half_vector, spot_dir);
+    if (flag(lut, 1u)) {
+        index = two_sided ? abs(index) : max(index, 0.0);
+        return LookupLightingLUTUnsigned(lut_index, index);
+    }
+    return LookupLightingLUTSigned(lut_index, index);
+}
+
+void lighting(uint config) {
+    vec4 diffuse_sum = vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 specular_sum = vec4(0.0, 0.0, 0.0, 1.0);
+    vec3 refl_value = vec3(0.0);
+    float clamp_highlights = 1.0;
+    float geo_factor = 1.0;
+    vec3 surface_normal = vec3(0.0, 0.0, 1.0);
+    vec3 surface_tangent = vec3(1.0, 0.0, 0.0);
+    uint bump_mode = bits(config, 12u, 2u);
+    if (bump_mode == BUMP_NORMAL_MAP) {
+        surface_normal = 2.0 * tex_color[bits(config, 14u, 2u)].rgb - 1.0;
+        if (flag(config, 16u)) {
+            surface_normal.z = sqrt(max((1.0 - (surface_normal.x*surface_normal.x + surface_normal.y*surface_normal.y)), 0.0));
+        }
+    } else if (bump_mode == BUMP_TANGENT_MAP) {
+        surface_tangent = 2.0 * tex_color[bits(config, 14u, 2u)].rgb - 1.0;
+    }
+#if USE_BARYCENTRIC
+    vec4 normquat_0 = normquats[0];
+    vec4 normquat_1 = mix(normquats[1], -normquats[1], bvec4(AreQuaternionsOpposite(normquats[0], normquats[1])));
+    vec4 normquat_2 = mix(normquats[2], -normquats[2], bvec4(AreQuaternionsOpposite(normquats[0], normquats[2])));
+    vec4 normquat = gl_BaryCoord.x * normquat_0 + gl_BaryCoord.y * normquat_1 + gl_BaryCoord.z * normquat_2;
+#endif
+    vec4 normalized_normquat = normalize(normquat);
+    vec3 normal = quaternion_rotate(normalized_normquat, surface_normal);
+    vec3 tangent = quaternion_rotate(normalized_normquat, surface_tangent);
+
+    vec4 shadow = vec4(1.0);
+    if (flag(config, 17u)) {
+        shadow = tex_color[bits(config, 22u, 2u)];
+        if (flag(config, 20u)) {
+            shadow = vec4(1.0) - shadow;
+        }
+    }
+
+    uint light_count = bits(config, 1u, 4u);
+    bool config_7 = bits(config, 6u, 4u) == LIGHTING_CONFIG_7;
+    uint lut_d0 = interp_lut[0].x;
+    uint lut_d1 = interp_lut[0].y;
+    uint lut_sp = interp_lut[0].z;
+    uint lut_fr = interp_lut[0].w;
+    uint lut_rr = interp_lut[1].x;
+    uint lut_rg = interp_lut[1].y;
+    uint lut_rb = interp_lut[1].z;
+
+    for (uint i = 0u; i < light_count; i++) {
+        uint light = interp_light[i >> 2][i & 3u];
+        int num = int(bits(light, 0u, 3u));
+        // Same as the generated shaders: two_sided comes from the entry indexed by the light num
+        bool two_sided = flag(interp_light[num >> 2][num & 3], 4u);
+
+        vec3 light_vector = light_src[num].position;
+        if (!flag(light, 3u)) {
+            light_vector += view;
+        }
+        float light_distance = length(light_vector);
+        light_vector = normalize(light_vector);
+        vec3 spot_dir = light_src[num].spot_direction;
+        vec3 half_vector = normalize(view) + light_vector;
+        float dot_product = flag(light, 4u) ? abs(dot(light_vector, normal)) : max(dot(light_vector, normal), 0.0);
+        if (flag(config, 5u)) {
+            clamp_highlights = sign(dot_product);
+        }
+
+        float spot_atten = 1.0;
+        if (flag(light, 6u) && flag(lut_sp, 0u)) {
+            spot_atten = interp_lut_scale[0].z * lutValue(LUT_SP + num, lut_sp, two_sided, config_7, normal, tangent, light_vector, half_vector, spot_dir);
+        }
+        float dist_atten = 1.0;
+        if (flag(light, 5u)) {
+            dist_atten = LookupLightingLUTUnsigned(LUT_DA + num, clamp(light_src[num].dist_atten_scale * light_distance + light_src[num].dist_atten_bias, 0.0, 1.0));
+        }
+        if (flag(light, 7u) || flag(light, 8u)) {
+            geo_factor = dot(half_vector, half_vector);
+            geo_factor = geo_factor == 0.0 ? 0.0 : min(dot_product / geo_factor, 1.0);
+        }
+
+        float d0_lut_value = 1.0;
+        if (flag(lut_d0, 0u)) {
+            d0_lut_value = interp_lut_scale[0].x * lutValue(LUT_D0, lut_d0, two_sided, config_7, normal, tangent, light_vector, half_vector, spot_dir);
+        }
+        vec3 specular_0 = d0_lut_value * light_src[num].specular_0;
+        if (flag(light, 7u)) {
+            specular_0 = specular_0 * geo_factor;
+        }
+
+        refl_value.r = 1.0;
+        if (flag(lut_rr, 0u)) {
+            refl_value.r = interp_lut_scale[1].x * lutValue(LUT_RR, lut_rr, two_sided, config_7, normal, tangent, light_vector, half_vector, spot_dir);
+        }
+        refl_value.g = refl_value.r;
+        if (flag(lut_rg, 0u)) {
+            refl_value.g = interp_lut_scale[1].y * lutValue(LUT_RG, lut_rg, two_sided, config_7, normal, tangent, light_vector, half_vector, spot_dir);
+        }
+        refl_value.b = refl_value.r;
+        if (flag(lut_rb, 0u)) {
+            refl_value.b = interp_lut_scale[1].z * lutValue(LUT_RB, lut_rb, two_sided, config_7, normal, tangent, light_vector, half_vector, spot_dir);
+        }
+
+        float d1_lut_value = 1.0;
+        if (flag(lut_d1, 0u)) {
+            d1_lut_value = interp_lut_scale[0].y * lutValue(LUT_D1, lut_d1, two_sided, config_7, normal, tangent, light_vector, half_vector, spot_dir);
+        }
+        vec3 specular_1 = d1_lut_value * refl_value * light_src[num].specular_1;
+        if (flag(light, 8u)) {
+            specular_1 = specular_1 * geo_factor;
+        }
+
+        if (i == light_count - 1u && flag(lut_fr, 0u)) {
+            float fresnel = interp_lut_scale[0].w * lutValue(LUT_FR, lut_fr, two_sided, config_7, normal, tangent, light_vector, half_vector, spot_dir);
+            if (flag(config, 10u)) {
+                diffuse_sum.a = fresnel;
+            }
+            if (flag(config, 11u)) {
+                specular_sum.a = fresnel;
+            }
+        }
+
+        if (flag(config, 18u) && flag(light, 9u)) {
+            diffuse_sum.rgb += ((light_src[num].diffuse * dot_product * shadow.rgb) + light_src[num].ambient) * dist_atten * spot_atten;
+        } else {
+            diffuse_sum.rgb += ((light_src[num].diffuse * dot_product) + light_src[num].ambient) * dist_atten * spot_atten;
+        }
+        if (flag(config, 19u) && flag(light, 9u)) {
+            specular_sum.rgb += (specular_0 + specular_1) * clamp_highlights * dist_atten * spot_atten * shadow.rgb;
+        } else {
+            specular_sum.rgb += (specular_0 + specular_1) * clamp_highlights * dist_atten * spot_atten;
+        }
+    }
+
+    if (flag(config, 21u)) {
+        if (flag(config, 10u)) {
+            diffuse_sum.a *= shadow.a;
+        }
+        if (flag(config, 11u)) {
+            specular_sum.a *= shadow.a;
+        }
+    }
+
+    diffuse_sum.rgb += lighting_global_ambient;
+    primary_fragment_color = clamp(diffuse_sum, vec4(0.0), vec4(1.0));
+    secondary_fragment_color = clamp(specular_sum, vec4(0.0), vec4(1.0));
+}
+
+void main() {
+    uint framebuffer_config = interp_config.x;
+    uint texture_config = interp_config.y;
+    uint lighting_config = interp_config.z;
+
+    // Sample all textures up front, outside of non-uniform control flow
+    vec2 texcoord_2 = flag(texture_config, 4u) ? texcoord1 : texcoord2;
+#if SHADOW_2D
+    vec4 texel_0 = shadowTexture(texcoord0, texcoord0_w, flag(texture_config, 13u));
+    vec4 texel_0_projected = texel_0;
+#elif TEXTURE_CUBE
+    vec4 texel_0 = texture(tex0, vec3(texcoord0, texcoord0_w));
+    vec4 texel_0_projected = texel_0;
+#else
+    vec4 texel_0 = textureLod(tex0, texcoord0, getLod(texcoord0 * vec2(textureSize(tex0, 0))) + tex_lod_bias[0]);
+    vec4 texel_0_projected = textureProj(tex0, vec3(texcoord0, texcoord0_w));
+#endif
+    vec4 texel_1 = textureLod(tex1, texcoord1, getLod(texcoord1 * vec2(textureSize(tex1, 0))) + tex_lod_bias[1]);
+    vec4 texel_2 = textureLod(tex2, texcoord_2, getLod(texcoord_2 * vec2(textureSize(tex2, 0))) + tex_lod_bias[2]);
+
+    uint texture0_type = bits(texture_config, 0u, 3u);
+    uint border = bits(texture_config, 16u, 6u);
+    tex_color[0] = texture0_type == TEX_PROJECTION_2D ? texel_0_projected : texel_0;
+    if ((flag(border, 0u) && (texcoord0.x < 0 || texcoord0.x > 1)) ||
+        (flag(border, 1u) && (texcoord0.y < 0 || texcoord0.y > 1))) {
+        tex_color[0] = tex_border_color[0];
+    }
+    if (texture0_type == TEX_DISABLED) {
+        tex_color[0] = vec4(0.0);
+    }
+    tex_color[1] = texel_1;
+    if ((flag(border, 2u) && (texcoord1.x < 0 || texcoord1.x > 1)) ||
+        (flag(border, 3u) && (texcoord1.y < 0 || texcoord1.y > 1))) {
+        tex_color[1] = tex_border_color[1];
+    }
+    tex_color[2] = texel_2;
+    if ((flag(border, 4u) && (texcoord_2.x < 0 || texcoord_2.x > 1)) ||
+        (flag(border, 5u) && (texcoord_2.y < 0 || texcoord_2.y > 1))) {
+        tex_color[2] = tex_border_color[2];
+    }
+    tex_color[3] = vec4(0.0);
+
+    rounded_primary_color = byteround(primary_color);
+    primary_fragment_color = vec4(0.0);
+    secondary_fragment_color = vec4(0.0);
+
+    uint alpha_test = bits(framebuffer_config, 0u, 3u);
+    if (alpha_test == CMP_NEVER) {
+        discard;
+    }
+
+    uint scissor_mode = bits(framebuffer_config, 4u, 2u);
+    bool in_scissor = gl_FragCoord.x >= float(scissor_x1) && gl_FragCoord.y >= float(scissor_y1) &&
+                      gl_FragCoord.x < float(scissor_x2) && gl_FragCoord.y < float(scissor_y2);
+    if ((scissor_mode == SCISSOR_INCLUDE && !in_scissor) || (scissor_mode == SCISSOR_EXCLUDE && in_scissor)) {
+        discard;
+    }
+
+    float z_over_w = -gl_FragCoord.z;
+    float depth = z_over_w * depth_scale + depth_offset;
+    if (flag(framebuffer_config, 8u)) {
+        depth /= gl_FragCoord.w;
+    }
+
+    if (flag(lighting_config, 0u)) {
+        lighting(lighting_config);
+    }
+
+    combiner_buffer = vec4(0.0);
+    vec4 next_combiner_buffer = tev_combiner_buffer_color;
+    combiner_output = vec4(0.0);
+    for (uint i = 0u; i < uint(NUM_TEV_STAGES); i++) {
+        uvec4 stage = interp_tev[i];
+        if (flag(stage.z, 16u)) {
+            vec3 color_1 = colorModifier(bits(stage.y, 0u, 4u), tevSource(bits(stage.x, 0u, 4u), i));
+            vec3 color_2 = colorModifier(bits(stage.y, 4u, 4u), tevSource(bits(stage.x, 4u, 4u), i));
+            vec3 color_3 = colorModifier(bits(stage.y, 8u, 4u), tevSource(bits(stage.x, 8u, 4u), i));
+            uint color_op = bits(stage.z, 0u, 4u);
+            vec3 color_output = byteround(colorCombiner(color_op, color_1, color_2, color_3));
+
+            float alpha_output;
+            if (color_op == OP_DOT3_RGBA) {
+                alpha_output = color_output[0];
+            } else {
+                float alpha_1 = alphaModifier(bits(stage.y, 12u, 4u), tevSource(bits(stage.x, 12u, 4u), i));
+                float alpha_2 = alphaModifier(bits(stage.y, 16u, 4u), tevSource(bits(stage.x, 16u, 4u), i));
+                float alpha_3 = alphaModifier(bits(stage.y, 20u, 4u), tevSource(bits(stage.x, 20u, 4u), i));
+                alpha_output = byteround(alphaCombiner(bits(stage.z, 4u, 4u), alpha_1, alpha_2, alpha_3));
+            }
+
+            combiner_output = vec4(clamp(color_output * float(bits(stage.z, 8u, 4u)), vec3(0.0), vec3(1.0)),
+                                   clamp(alpha_output * float(bits(stage.z, 12u, 4u)), 0.0, 1.0));
+        }
+
+        combiner_buffer = next_combiner_buffer;
+        if (flag(stage.z, 17u)) {
+            next_combiner_buffer.rgb = combiner_output.rgb;
+        }
+        if (flag(stage.z, 18u)) {
+            next_combiner_buffer.a = combiner_output.a;
+        }
+    }
+
+    int alpha = int(combiner_output.a * 255.0);
+    bool alpha_fails = false;
+    switch (alpha_test) {
+    case CMP_EQUAL:
+        alpha_fails = alpha != alphatest_ref;
+        break;
+    case CMP_NOT_EQUAL:
+        alpha_fails = alpha == alphatest_ref;
+        break;
+    case CMP_LESS:
+        alpha_fails = alpha >= alphatest_ref;
+        break;
+    case CMP_LESS_EQUAL:
+        alpha_fails = alpha > alphatest_ref;
+        break;
+    case CMP_GREATER:
+        alpha_fails = alpha <= alphatest_ref;
+        break;
+    case CMP_GREATER_EQUAL:
+        alpha_fails = alpha < alphatest_ref;
+        break;
+    default:
+        break;
+    }
+    if (alpha_fails) {
+        discard;
+    }
+
+    if (bits(texture_config, 8u, 3u) == FOG_ENABLED) {
+        float fog_index = flag(texture_config, 12u) ? (1.0 - float(depth)) * 128.0 : depth * 128.0;
+        float fog_i = clamp(floor(fog_index), 0.0, 127.0);
+        float fog_f = fog_index - fog_i;
+        vec2 fog_lut_entry = texelFetch(texture_buffer_lut_lf, int(fog_i) + fog_lut_offset).rg;
+        float fog_factor = fog_lut_entry.r + fog_lut_entry.g * fog_f;
+        fog_factor = clamp(fog_factor, 0.0, 1.0);
+        combiner_output.rgb = mix(fog_color.rgb, combiner_output.rgb, fog_factor);
+    }
+
+#if SHADOW_RENDERING
+    uint d = uint(clamp(depth, 0.0, 1.0) * float(0xFFFFFF));
+    uint s = uint(combiner_output.g * float(0xFF));
+    ivec2 image_coord = ivec2(gl_FragCoord.xy);
+#if USE_INTERLOCK
+    beginInvocationInterlock();
+    uint old_shadow = imageLoad(shadow_buffer, image_coord).x;
+    uint new_shadow = UpdateShadow(old_shadow, d, s);
+    imageStore(shadow_buffer, image_coord, uvec4(new_shadow));
+    endInvocationInterlock();
+#else
+    uint old = imageLoad(shadow_buffer, image_coord).x;
+    uint new1;
+    uint old2;
+    do {
+        old2 = old;
+        new1 = UpdateShadow(old, d, s);
+    } while ((old = imageAtomicCompSwap(shadow_buffer, image_coord, old, new1)) != old2);
+#endif
+#else
+    gl_FragDepth = depth;
+    combiner_output = byteround(combiner_output);
+    color = combiner_output;
+#endif
+
+    uint logic_op = bits(framebuffer_config, 12u, 4u);
+    if (logic_op == LOGIC_CLEAR) {
+        color = vec4(0);
+    } else if (logic_op == LOGIC_SET) {
+        color = vec4(1);
+    }
+}
+)glsl";
+    return out;
+}
+
 } // namespace Pica::Shader::Generator::GLSL

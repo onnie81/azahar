@@ -943,13 +943,15 @@ class SettingsFragmentPresenter(
                 )
             )
             add(
-                SwitchSetting(
+                SingleChoiceSetting(
                     editingSettings,
-                    BooleanSetting.ASYNC_SHADERS,
+                    IntSetting.ASYNC_SHADERS,
                     R.string.async_shaders,
                     R.string.async_shaders_description,
-                    BooleanSetting.ASYNC_SHADERS.key,
-                    BooleanSetting.ASYNC_SHADERS.defaultValue
+                    R.array.asyncShadersNames,
+                    R.array.asyncShadersValues,
+                    IntSetting.ASYNC_SHADERS.key,
+                    IntSetting.ASYNC_SHADERS.defaultValue
                 )
             )
             add(
