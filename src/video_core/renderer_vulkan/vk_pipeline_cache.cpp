@@ -134,6 +134,10 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     }
 
     BuildLayout();
+    if (instance.IsGraphicsPipelineLibrarySupported()) {
+        pipeline_libraries =
+            std::make_unique<PipelineLibraries>(instance, renderpass_cache, *pipeline_layout);
+    }
 
     const bool interpret_fragments = Settings::values.async_fragment_interpreter.GetValue();
     for (u32 i = 0; interpret_fragments && i < fragment_interpreters.size(); i++) {
