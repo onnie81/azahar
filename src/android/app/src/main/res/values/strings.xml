@@ -281,7 +281,7 @@
     <string name="disable_spirv_optimizer">Disable SPIR-V Optimizer</string>
     <string name="disable_spirv_optimizer_description">Disables the SPIR-V optimization pass, reducing stuttering considerably while barely affecting performance.</string>
     <string name="async_shaders">Asynchronous Shader Compilation</string>
-    <string name="async_shaders_description">Compiles shaders in the background to reduce stuttering during gameplay. Skip Draws: objects are missing until their shader is ready. Interpreter: objects are drawn with a slower generic shader until their shader is ready.</string>
+    <string name="async_shaders_description">Compiles shaders in the background to reduce stuttering during gameplay. Skip Draws: objects are missing until their shader is ready. Interpreter: objects are drawn with a generic vertex shader until their own is ready.</string>
     <string name="async_shaders_skip_draws">Skip Draws</string>
     <string name="async_shaders_interpreter">Interpreter</string>
     <string name="linear_filtering">Linear Filtering</string>

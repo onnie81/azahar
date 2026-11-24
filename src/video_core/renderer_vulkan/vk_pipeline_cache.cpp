@@ -135,7 +135,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
 
     BuildLayout();
 
-    for (u32 i = 0; i < fragment_interpreters.size(); i++) {
+    const bool interpret_fragments = Settings::values.async_fragment_interpreter.GetValue();
+    for (u32 i = 0; interpret_fragments && i < fragment_interpreters.size(); i++) {
         fragment_interpreters[i] = std::make_unique<Shader>(instance);
         shader_workers.QueueWork([this, i] {
             Shader& shader = *fragment_interpreters[i];
@@ -660,7 +661,7 @@ void PipelineCache::UseFragmentInterpreter(u32 variant) {
 
 bool PipelineCache::InterpretersFailed() {
     const auto failed = [](const std::unique_ptr<Shader>& shader) {
-        return shader->IsDone() && !shader->Handle();
+        return shader && shader->IsDone() && !shader->Handle();
     };
     return std::ranges::any_of(fragment_interpreters, failed) ||
            std::ranges::any_of(vertex_interpreters, failed);
