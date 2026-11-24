@@ -152,7 +152,9 @@ std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseProgrammableVer
 std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseFragmentShader(
     const Pica::RegsInternal& regs, const Pica::Shader::UserConfig& user) {
 
-    const FSConfig fs_config{regs};
+    FSConfig fs_config{regs};
+    // The viewport takes the depth range where it can
+    fs_config.framebuffer.rasterizer_depth.Assign(ViewportDepthRange(regs).has_value());
     const auto fs_config_hash = fs_config.Hash();
     const auto [it, new_shader] = fragment_shaders.try_emplace(fs_config_hash, parent.instance);
     auto& shader = it->second;
