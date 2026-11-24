@@ -84,7 +84,8 @@ constexpr std::string_view PositionOutput =
 #endif
 
 static std::string GetVertexInterfaceDeclaration(bool is_output, bool use_clip_planes,
-                                                 bool separable_shader) {
+                                                 bool separable_shader,
+                                                 bool invariant_position = false) {
     std::string out;
 
     const auto append_variable = [&](std::string_view var, int location) {
@@ -108,10 +109,9 @@ static std::string GetVertexInterfaceDeclaration(bool is_output, bool use_clip_p
         // Apple Silicon GPU drivers optimize more aggressively, which can create
         // too much variance and cause visual artifacting in games like Pokemon.
 #ifdef __APPLE__
-        out += "    invariant vec4 gl_Position;\n";
-#else
-        out += "    vec4 gl_Position;\n";
+        invariant_position = true;
 #endif
+        out += invariant_position ? "    invariant vec4 gl_Position;\n" : "    vec4 gl_Position;\n";
         if (use_clip_planes) {
             out += "    float gl_ClipDistance[2];\n";
         }
@@ -310,7 +310,7 @@ std::string GenerateVertexInterpreter(bool use_clip_planes, bool sanitize_mul) {
            "layout (set = 0, binding = 7, std430) readonly buffer vs_vertex_data {\n"
            "    uint vertex_words[];\n"
            "};\n";
-    out += GetVertexInterfaceDeclaration(true, use_clip_planes, true);
+    out += GetVertexInterfaceDeclaration(true, use_clip_planes, true, true);
 
     std::string body = R"glsl(
 // inputs 0-15, temporaries 16-31, outputs 32-47, 48 is never written
@@ -985,10 +985,14 @@ std::string GenerateVertexShader(const ShaderSetup& setup, const PicaVSConfig& c
                 out += fmt::format("layout(location = {}) ", i);
             }
             out += fmt::format("out vec4 vs_out_attr{};\n", i);
+            if (extra.invariant_position) {
+                out += fmt::format("invariant vs_out_attr{};\n", i);
+            }
         }
         out += "void EmitVtx() {}\n";
     } else {
-        out += GetVertexInterfaceDeclaration(true, extra.use_clip_planes, separable_shader);
+        out += GetVertexInterfaceDeclaration(true, extra.use_clip_planes, separable_shader,
+                                             extra.invariant_position);
 
         // output attributes declaration
         for (u32 i = 0; i < config.state.num_outputs; ++i) {

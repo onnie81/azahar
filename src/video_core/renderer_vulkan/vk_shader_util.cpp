@@ -158,6 +158,54 @@ bool InitializeCompiler() {
     glslang_initialized = true;
     return true;
 }
+/// Decorates the float arithmetic of a module with NoContraction
+void DisableContraction(std::vector<u32>& code) {
+    constexpr std::size_t HEADER_WORDS = 5;
+    constexpr u32 OP_DECORATE = 71;
+    constexpr u32 OP_MEMBER_DECORATE = 72;
+    constexpr u32 DECORATION_NO_CONTRACTION = 42;
+    const auto is_float_arithmetic = [](u32 opcode) {
+        switch (opcode) {
+        case 127: // OpFNegate
+        case 129: // OpFAdd
+        case 131: // OpFSub
+        case 133: // OpFMul
+        case 136: // OpFDiv
+        case 140: // OpFRem
+        case 141: // OpFMod
+        case 142: // OpVectorTimesScalar
+        case 143: // OpMatrixTimesScalar
+        case 144: // OpVectorTimesMatrix
+        case 145: // OpMatrixTimesVector
+        case 146: // OpMatrixTimesMatrix
+        case 148: // OpDot
+            return true;
+        default:
+            return false;
+        }
+    };
+
+    std::vector<u32> decorations;
+    std::size_t annotations = 0;
+    for (std::size_t pos = HEADER_WORDS; pos < code.size();) {
+        const u32 opcode = code[pos] & 0xFFFF;
+        const u32 length = code[pos] >> 16;
+        if (length == 0) {
+            return;
+        }
+        if (annotations == 0 && (opcode == OP_DECORATE || opcode == OP_MEMBER_DECORATE)) {
+            annotations = pos;
+        }
+        if (is_float_arithmetic(opcode)) {
+            decorations.insert(decorations.end(), {(3u << 16) | OP_DECORATE, code[pos + 2],
+                                                   DECORATION_NO_CONTRACTION});
+        }
+        pos += length;
+    }
+    if (annotations != 0) {
+        code.insert(code.begin() + annotations, decorations.begin(), decorations.end());
+    }
+}
 } // Anonymous namespace
 
 std::vector<u32> CompileGLSL(std::string_view code, vk::ShaderStageFlagBits stage,
@@ -211,6 +259,13 @@ std::vector<u32> CompileGLSL(std::string_view code, vk::ShaderStageFlagBits stag
 
     out_code.reserve(8_KiB);
     glslang::GlslangToSpv(*intermediate, out_code, &logger, &options);
+
+    // The vertex interpreter has to land on the same depth as the shader it stands in for,
+    // which a multiply and an add fused in only one of them prevents
+    if (stage == vk::ShaderStageFlagBits::eVertex &&
+        Settings::values.async_shader_interpreter.GetValue()) {
+        DisableContraction(out_code);
+    }
 
     const std::string spv_messages = logger.getAllMessages();
     if (!spv_messages.empty()) {
