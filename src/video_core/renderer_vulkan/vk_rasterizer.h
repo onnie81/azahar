@@ -160,6 +160,9 @@ private:
     u32 uniform_size_aligned_fs;
     bool async_shaders{false};
     bool interpreter_handoff{false};
+    /// The color attachment of the open pass while a draw that has none goes into it
+    vk::ImageView kept_color_view{};
+    bool kept_color_sampled{false};
     bool interpret_fragments{false};
     /// Offsets of the decoded vertex programs in their buffer, by program hash
     std::unordered_map<u64, u32> interpreter_programs;
