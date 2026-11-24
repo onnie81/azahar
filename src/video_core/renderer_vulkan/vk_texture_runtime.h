@@ -375,6 +375,10 @@ public:
         return sample_count;
     }
 
+    vk::Extent2D Extent() const noexcept {
+        return {width, height};
+    }
+
 private:
     const Instance& instance;
     // Color, Depth, ColorMSAA, DepthMSAA
