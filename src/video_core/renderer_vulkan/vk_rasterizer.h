@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <unordered_map>
+
 #include "video_core/rasterizer_accelerated.h"
 #include "video_core/renderer_vulkan/vk_descriptor_update_queue.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -153,9 +155,8 @@ private:
     u32 uniform_size_aligned_fs;
     bool async_shaders{false};
     bool interpreter_handoff{false};
-    /// Hash of the vertex program last uploaded for the interpreter
-    u64 interpreter_program_hash{};
-    bool interpreter_program_dirty{true};
+    /// Offsets of the decoded vertex programs in the uniform buffer, by program hash
+    std::unordered_map<u64, u32> interpreter_programs;
 };
 
 } // namespace Vulkan

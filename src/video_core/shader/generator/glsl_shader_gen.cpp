@@ -5,6 +5,9 @@
 #include <string_view>
 #include <fmt/format.h>
 
+#include <algorithm>
+#include <array>
+#include <bitset>
 #include <nihstro/shader_bytecode.h>
 #include "video_core/pica/regs_pipeline.h"
 #include "video_core/pica/regs_rasterizer.h"
@@ -170,8 +173,55 @@ void main() {
     return out;
 }
 
+namespace {
+
+// Decoded instruction layout.
+// Word 0: op | dest << 5 | dest mask << 11 | address register << 15 | a << 17 | b << 24 |
+//         block end << 31
+// Word 1: c | swizzle a << 5 | swizzle b << 13 | swizzle c << 21 | negate a, b, c << 29
+// Flow control uses word 1 as: target | count << 12 | instruction bits 22-25 << 20
+enum class InterpOp : u32 {
+    Mov,
+    Add,
+    Mul,
+    Mad,
+    Dp3,
+    Dp4,
+    Dph,
+    Max,
+    Min,
+    Flr,
+    Rcp,
+    Rsq,
+    Sge,
+    Slt,
+    Ex2,
+    Lg2,
+    Mova,
+    Cmp,
+    // Flow control from here on
+    End,
+    Jmpc,
+    Jmpu,
+    Call,
+    Callc,
+    Callu,
+    Ifu,
+    Ifc,
+    Loop,
+    Break,
+    Breakc,
+    Nop,
+};
+
+// Register file of the interpreter: inputs, temporaries, outputs and one left at (0, 0, 0, 1)
+constexpr u32 INTERP_REG_OUTPUT = 32;
+constexpr u32 INTERP_REG_DEFAULT = 48;
+constexpr u32 INTERP_REG_COUNT = 49;
+
+} // Anonymous namespace
+
 std::string GenerateVertexInterpreter(bool use_clip_planes, bool sanitize_mul) {
-    using OpCode = nihstro::OpCode::Id;
     using CompareOp = nihstro::Instruction::Common::CompareOpType::Op;
     using FlowOp = nihstro::Instruction::FlowControlType::Op;
     using Format = Pica::PipelineRegs::VertexAttributeFormat;
@@ -183,46 +233,40 @@ std::string GenerateVertexInterpreter(bool use_clip_planes, bool sanitize_mul) {
     const auto define = [&out](std::string_view name, auto value) {
         out += fmt::format("#define {} {}u\n", name, static_cast<u32>(value));
     };
-    define("OP_ADD", OpCode::ADD);
-    define("OP_DP3", OpCode::DP3);
-    define("OP_DP4", OpCode::DP4);
-    define("OP_DPH", OpCode::DPH);
-    define("OP_EX2", OpCode::EX2);
-    define("OP_LG2", OpCode::LG2);
-    define("OP_MUL", OpCode::MUL);
-    define("OP_SGE", OpCode::SGE);
-    define("OP_SLT", OpCode::SLT);
-    define("OP_FLR", OpCode::FLR);
-    define("OP_MAX", OpCode::MAX);
-    define("OP_MIN", OpCode::MIN);
-    define("OP_RCP", OpCode::RCP);
-    define("OP_RSQ", OpCode::RSQ);
-    define("OP_MOVA", OpCode::MOVA);
-    define("OP_MOV", OpCode::MOV);
-    define("OP_DPHI", OpCode::DPHI);
-    define("OP_DSTI", OpCode::DSTI);
-    define("OP_SGEI", OpCode::SGEI);
-    define("OP_SLTI", OpCode::SLTI);
-    define("OP_BREAK", OpCode::BREAK);
-    define("OP_END", OpCode::END);
-    define("OP_BREAKC", OpCode::BREAKC);
-    define("OP_CALL", OpCode::CALL);
-    define("OP_CALLC", OpCode::CALLC);
-    define("OP_CALLU", OpCode::CALLU);
-    define("OP_IFU", OpCode::IFU);
-    define("OP_IFC", OpCode::IFC);
-    define("OP_LOOP", OpCode::LOOP);
-    define("OP_JMPC", OpCode::JMPC);
-    define("OP_JMPU", OpCode::JMPU);
-    define("OP_CMP", OpCode::CMP);
-    define("OP_MADI", OpCode::MADI);
-    define("OP_MAD", OpCode::MAD);
+    define("OP_ADD", InterpOp::Add);
+    define("OP_MUL", InterpOp::Mul);
+    define("OP_MAD", InterpOp::Mad);
+    define("OP_DP3", InterpOp::Dp3);
+    define("OP_DP4", InterpOp::Dp4);
+    define("OP_DPH", InterpOp::Dph);
+    define("OP_MAX", InterpOp::Max);
+    define("OP_MIN", InterpOp::Min);
+    define("OP_FLR", InterpOp::Flr);
+    define("OP_RCP", InterpOp::Rcp);
+    define("OP_RSQ", InterpOp::Rsq);
+    define("OP_SGE", InterpOp::Sge);
+    define("OP_SLT", InterpOp::Slt);
+    define("OP_EX2", InterpOp::Ex2);
+    define("OP_LG2", InterpOp::Lg2);
+    define("OP_MOVA", InterpOp::Mova);
+    define("OP_CMP", InterpOp::Cmp);
+    define("OP_END", InterpOp::End);
+    define("OP_JMPC", InterpOp::Jmpc);
+    define("OP_JMPU", InterpOp::Jmpu);
+    define("OP_CALL", InterpOp::Call);
+    define("OP_CALLC", InterpOp::Callc);
+    define("OP_CALLU", InterpOp::Callu);
+    define("OP_IFU", InterpOp::Ifu);
+    define("OP_IFC", InterpOp::Ifc);
+    define("OP_LOOP", InterpOp::Loop);
+    define("OP_BREAK", InterpOp::Break);
+    define("OP_BREAKC", InterpOp::Breakc);
+    define("REG_COUNT", INTERP_REG_COUNT);
     define("CMP_EQUAL", CompareOp::Equal);
     define("CMP_NOT_EQUAL", CompareOp::NotEqual);
     define("CMP_LESS_THAN", CompareOp::LessThan);
     define("CMP_LESS_EQUAL", CompareOp::LessEqual);
     define("CMP_GREATER_THAN", CompareOp::GreaterThan);
-    define("CMP_GREATER_EQUAL", CompareOp::GreaterEqual);
     define("FLOW_OR", FlowOp::Or);
     define("FLOW_AND", FlowOp::And);
     define("FLOW_JUST_X", FlowOp::JustX);
@@ -253,18 +297,15 @@ std::string GenerateVertexInterpreter(bool use_clip_planes, bool sanitize_mul) {
     define("TEXCOORD2_V", VSOutputAttributes::TEXCOORD2_V);
 
     out += VSPicaUniformBlockDef;
-    // Regular vs uniform block plus the interpreter fields
     std::string block{VSUniformBlockDef};
     block.replace(block.find("};"), 2,
                   "    uvec4 interp_config;\n"
-                  "    uvec4 interp_output_map[4];\n"
                   "    uvec4 interp_semantic_map[6];\n"
                   "    uvec4 interp_attributes[16];\n"
                   "};");
     out += block;
     out += "layout (set = 0, binding = 6, std140) uniform vs_interpreter_program {\n"
-           "    uvec4 program_code[1024];\n"
-           "    uvec4 swizzle_data[32];\n"
+           "    uvec4 program_code[2048];\n"
            "};\n"
            "layout (set = 0, binding = 7, std430) readonly buffer vs_vertex_data {\n"
            "    uint vertex_words[];\n"
@@ -272,11 +313,11 @@ std::string GenerateVertexInterpreter(bool use_clip_planes, bool sanitize_mul) {
     out += GetVertexInterfaceDeclaration(true, use_clip_planes, true);
 
     std::string body = R"glsl(
-vec4 reg_in[16];
-vec4 reg_tmp[16];
-vec4 reg_out[16];
+// inputs 0-15, temporaries 16-31, outputs 32-47, 48 is never written
+vec4 regs[REG_COUNT];
 bvec2 conditional_code = bvec2(false);
-ivec3 address_registers = ivec3(0);
+// x stays 0 for operands without an address register, then a0.x, a0.y, aL
+ivec4 address_registers = ivec4(0);
 
 #if SANITIZE_MUL
 vec4 sanitize_mul(vec4 lhs, vec4 rhs) {
@@ -292,85 +333,63 @@ uint bits(uint word, uint shift, uint count) {
     return (word >> shift) & ((1u << count) - 1u);
 }
 
-// Vertex data is not word aligned
-uint vertexWord(uint address) {
+// Reads up to 4 bytes of vertex data, unaligned
+uint vertexBytes(uint address, uint count) {
     uint index = address >> 2;
-    uint shift = (address & 3u) * 8u;
-    uint low = vertex_words[index];
-    if (shift == 0u) {
-        return low;
+    uint skip = address & 3u;
+    uint word = vertex_words[index] >> (skip * 8u);
+    if (skip + count > 4u) {
+        word |= vertex_words[index + 1u] << (32u - skip * 8u);
     }
-    return (low >> shift) | (vertex_words[index + 1u] << (32u - shift));
+    return word;
 }
 
 vec4 loadAttribute(uvec4 slot) {
-    vec4 value = vec4(0.0, 0.0, 0.0, 1.0);
     uint address = slot.x + uint(gl_VertexIndex) * slot.y;
-    for (uint i = 0u; i < slot.w; i++) {
-        switch (slot.z) {
-        case FORMAT_BYTE:
-            value[i] = float(int(vertexWord(address + i) << 24) >> 24);
-            break;
-        case FORMAT_UBYTE:
-            value[i] = float(vertexWord(address + i) & 0xFFu);
-            break;
-        case FORMAT_SHORT:
-            value[i] = float(int(vertexWord(address + 2u * i) << 16) >> 16);
-            break;
-        default:
-            value[i] = uintBitsToFloat(vertexWord(address + 4u * i));
-            break;
+    uint count = slot.w;
+    vec4 value = vec4(0.0);
+    switch (slot.z) {
+    case FORMAT_BYTE:
+        value = vec4((ivec4(vertexBytes(address, count)) << ivec4(24, 16, 8, 0)) >> 24);
+        break;
+    case FORMAT_UBYTE:
+        value = vec4((uvec4(vertexBytes(address, count)) >> uvec4(0u, 8u, 16u, 24u)) & 0xFFu);
+        break;
+    case FORMAT_SHORT: {
+        uint low = vertexBytes(address, min(count, 2u) * 2u);
+        uint high = count > 2u ? vertexBytes(address + 4u, count * 2u - 4u) : 0u;
+        value = vec4((ivec4(low, low, high, high) << ivec4(16, 0, 16, 0)) >> 16);
+        break;
+    }
+    default:
+        for (uint i = 0u; i < count; i++) {
+            value[i] = uintBitsToFloat(vertexBytes(address + 4u * i, 4u));
         }
+        break;
     }
-    return value;
+    return mix(vec4(0.0, 0.0, 0.0, 1.0), value, lessThan(uvec4(0u, 1u, 2u, 3u), uvec4(count)));
 }
 
-vec4 sourceRegister(uint reg, uint address_index) {
-    if (reg < 0x10u) {
-        return reg_in[reg];
+vec4 operand(uint index, uint selector, bool negate, uint address_index) {
+    vec4 value;
+    if (index < 32u) {
+        value = regs[index];
+    } else {
+        int offset = address_registers[address_index];
+        offset = offset >= -128 && offset <= 127 ? offset : 0;
+        uint slot = uint(int(index) - 32 + offset) & 0x7Fu;
+        value = slot < 96u ? uniforms.f[slot] : vec4(1.0);
     }
-    if (reg < 0x20u) {
-        return reg_tmp[reg - 0x10u];
-    }
-    uint index = reg - 0x20u;
-    if (address_index != 0u) {
-        int offset = address_registers[address_index - 1u];
-        int fixed_offset = offset >= -128 && offset <= 127 ? offset : 0;
-        index = uint((int(index) + fixed_offset) & 0x7F);
-        return index < 96u ? uniforms.f[index] : vec4(1.0);
-    }
-    return uniforms.f[index];
+    value = vec4(value[selector >> 6], value[(selector >> 4) & 3u], value[(selector >> 2) & 3u],
+                 value[selector & 3u]);
+    return negate ? -value : value;
 }
 
-vec4 source(uint reg, uint address_index, uint pattern, uint negate_bit, uint selector_shift) {
-    vec4 value = sourceRegister(reg, address_index);
-    uint selector = bits(pattern, selector_shift, 8u);
-    value = vec4(value[bits(selector, 6u, 2u)], value[bits(selector, 4u, 2u)],
-                 value[bits(selector, 2u, 2u)], value[bits(selector, 0u, 2u)]);
-    return bits(pattern, negate_bit, 1u) != 0u ? -value : value;
-}
-
-void setDest(uint dest, uint pattern, vec4 value) {
-    bvec4 mask = bvec4((pattern & 8u) != 0u, (pattern & 4u) != 0u, (pattern & 2u) != 0u,
-                       (pattern & 1u) != 0u);
-    if (dest < 0x10u) {
-        uint mapped = interp_output_map[dest >> 2][dest & 3u];
-        if (mapped < interp_config.y) {
-            reg_out[mapped] = mix(reg_out[mapped], value, mask);
-        }
-    } else if (dest < 0x20u) {
-        reg_tmp[dest - 0x10u] = mix(reg_tmp[dest - 0x10u], value, mask);
-    }
-}
-
-uint swizzlePattern(uint id) {
-    return swizzle_data[id >> 2][id & 3u];
-}
-
-bool evaluateCondition(uint instr) {
-    bool result_x = (bits(instr, 25u, 1u) != 0u) == conditional_code.x;
-    bool result_y = (bits(instr, 24u, 1u) != 0u) == conditional_code.y;
-    switch (bits(instr, 22u, 2u)) {
+// flow: bits 22-25 of the instruction
+bool evaluateCondition(uint flow) {
+    bool result_x = ((flow & 8u) != 0u) == conditional_code.x;
+    bool result_y = ((flow & 4u) != 0u) == conditional_code.y;
+    switch (flow & 3u) {
     case FLOW_OR:
         return result_x || result_y;
     case FLOW_AND:
@@ -403,129 +422,6 @@ bool compare(uint op, float a, float b) {
     }
 }
 
-void arithmetic(uint opcode, uint instr) {
-    uint pattern = swizzlePattern(bits(instr, 0u, 7u));
-    bool inverted = opcode == OP_DPHI || opcode == OP_DSTI || opcode == OP_SGEI || opcode == OP_SLTI;
-    uint address_index = bits(instr, 19u, 2u);
-    uint reg_1 = inverted ? bits(instr, 14u, 5u) : bits(instr, 12u, 7u);
-    uint reg_2 = inverted ? bits(instr, 7u, 7u) : bits(instr, 7u, 5u);
-    vec4 src1 = source(reg_1, inverted ? 0u : address_index, pattern, 4u, 5u);
-    vec4 src2 = source(reg_2, inverted ? address_index : 0u, pattern, 13u, 14u);
-    uint dest = bits(instr, 21u, 5u);
-
-    switch (opcode) {
-    case OP_ADD:
-        setDest(dest, pattern, src1 + src2);
-        break;
-    case OP_MUL:
-        setDest(dest, pattern, MUL(src1, src2));
-        break;
-    case OP_FLR:
-        setDest(dest, pattern, floor(src1));
-        break;
-    case OP_MAX:
-#if SANITIZE_MUL
-        setDest(dest, pattern, mix(src2, src1, greaterThan(src1, src2)));
-#else
-        setDest(dest, pattern, max(src1, src2));
-#endif
-        break;
-    case OP_MIN:
-#if SANITIZE_MUL
-        setDest(dest, pattern, mix(src2, src1, lessThan(src1, src2)));
-#else
-        setDest(dest, pattern, min(src1, src2));
-#endif
-        break;
-    case OP_DP3:
-#if SANITIZE_MUL
-        setDest(dest, pattern, vec4(dot(vec3(sanitize_mul(src1, src2)), vec3(1.0))));
-#else
-        setDest(dest, pattern, vec4(dot(vec3(src1), vec3(src2))));
-#endif
-        break;
-    case OP_DP4:
-#if SANITIZE_MUL
-        setDest(dest, pattern, vec4(dot(sanitize_mul(src1, src2), vec4(1.0))));
-#else
-        setDest(dest, pattern, vec4(dot(src1, src2)));
-#endif
-        break;
-    case OP_DPH:
-    case OP_DPHI:
-#if SANITIZE_MUL
-        setDest(dest, pattern, vec4(dot(sanitize_mul(vec4(src1.xyz, 1.0), src2), vec4(1.0))));
-#else
-        setDest(dest, pattern, vec4(dot(src1, src2)));
-#endif
-        break;
-    case OP_RCP:
-#if !SANITIZE_MUL
-        if (src1.x != 0.0)
-#endif
-        setDest(dest, pattern, vec4(1.0 / src1.x));
-        break;
-    case OP_RSQ:
-#if !SANITIZE_MUL
-        if (src1.x > 0.0)
-#endif
-        setDest(dest, pattern, vec4(inversesqrt(src1.x)));
-        break;
-    case OP_MOVA: {
-        ivec2 address = ivec2(src1);
-        if ((pattern & 8u) != 0u) {
-            address_registers.x = address.x;
-        }
-        if ((pattern & 4u) != 0u) {
-            address_registers.y = address.y;
-        }
-        break;
-    }
-    case OP_MOV:
-        setDest(dest, pattern, src1);
-        break;
-    case OP_SGE:
-    case OP_SGEI:
-        setDest(dest, pattern, vec4(greaterThanEqual(src1, src2)));
-        break;
-    case OP_SLT:
-    case OP_SLTI:
-        setDest(dest, pattern, vec4(lessThan(src1, src2)));
-        break;
-    case OP_EX2:
-        setDest(dest, pattern, vec4(exp2(src1.x)));
-        break;
-    case OP_LG2:
-        setDest(dest, pattern, vec4(log2(src1.x)));
-        break;
-    default:
-        break;
-    }
-}
-
-void compareInstruction(uint instr) {
-    uint pattern = swizzlePattern(bits(instr, 0u, 7u));
-    vec4 src1 = source(bits(instr, 12u, 7u), bits(instr, 19u, 2u), pattern, 4u, 5u);
-    vec4 src2 = source(bits(instr, 7u, 5u), 0u, pattern, 13u, 14u);
-    uint op_x = bits(instr, 24u, 3u);
-    uint op_y = bits(instr, 21u, 3u);
-    if (op_x <= CMP_GREATER_EQUAL && op_y <= CMP_GREATER_EQUAL) {
-        conditional_code = bvec2(compare(op_x, src1.x, src2.x), compare(op_y, src1.y, src2.y));
-    }
-}
-
-void multiplyAdd(uint opcode, uint instr) {
-    bool inverted = opcode < OP_MAD;
-    uint pattern = swizzlePattern(bits(instr, 0u, 5u));
-    uint address_index = bits(instr, 22u, 2u);
-    uint reg_2 = inverted ? bits(instr, 12u, 5u) : bits(instr, 10u, 7u);
-    uint reg_3 = inverted ? bits(instr, 5u, 7u) : bits(instr, 5u, 5u);
-    vec4 src1 = source(bits(instr, 17u, 5u), 0u, pattern, 4u, 5u);
-    vec4 src2 = source(reg_2, inverted ? 0u : address_index, pattern, 13u, 14u);
-    vec4 src3 = source(reg_3, inverted ? address_index : 0u, pattern, 22u, 23u);
-    setDest(bits(instr, 24u, 5u), pattern, MUL(src1, src2) + src3);
-}
-
 // Same if/call/loop stacks as the software interpreter
 void runProgram() {
     uint if_else[8];
@@ -543,69 +439,178 @@ void runProgram() {
 
     uint pc = interp_config.x;
     for (uint executed = 0u; executed < MAX_INSTRUCTIONS; executed++) {
+        if (pc >= 4095u) {
+            return;
+        }
+        uvec4 pair = program_code[pc >> 1];
+        uvec2 ins = (pc & 1u) == 0u ? pair.xy : pair.zw;
+        uint op = ins.x & 31u;
         uint old_pc = pc;
         bool is_break = false;
-        uint instr = pc < 4095u ? program_code[pc >> 2][pc & 3u] : (OP_END << 26);
-        uint opcode = instr >> 26;
-        uint target = bits(instr, 10u, 12u);
-        uint count = bits(instr, 0u, 8u);
+        pc++;
 
-        if (opcode >= OP_MADI) {
-            multiplyAdd(opcode, instr);
-        } else if (opcode == OP_CMP || opcode == OP_CMP + 1u) {
-            compareInstruction(instr);
-        } else if (opcode < OP_BREAK) {
-            arithmetic(opcode, instr);
-        } else if (opcode == OP_END) {
-            return;
-        } else if (opcode == OP_JMPC) {
-            if (evaluateCondition(instr)) {
-                pc = target - 1u;
+        if (op < OP_END) {
+            uint dest = bits(ins.x, 5u, 6u);
+            uint mask = bits(ins.x, 11u, 4u);
+            uint address_index = bits(ins.x, 15u, 2u);
+            vec4 a = operand(bits(ins.x, 17u, 7u), bits(ins.y, 5u, 8u), (ins.y & 0x20000000u) != 0u,
+                             address_index);
+            vec4 b = operand(bits(ins.x, 24u, 7u), bits(ins.y, 13u, 8u),
+                             (ins.y & 0x40000000u) != 0u, address_index);
+            vec4 value = a;
+            bool write = true;
+            switch (op) {
+            case OP_ADD:
+                value = a + b;
+                break;
+            case OP_MUL:
+                value = MUL(a, b);
+                break;
+            case OP_MAD: {
+                vec4 c = operand(ins.y & 31u, bits(ins.y, 21u, 8u), (ins.y >> 31) != 0u, 0u);
+                value = MUL(c, a) + b;
+                break;
             }
-        } else if (opcode == OP_JMPU) {
-            if (boolUniform(bits(instr, 22u, 4u)) == ((count & 1u) == 0u)) {
-                pc = target - 1u;
-            }
-        } else if (opcode == OP_CALL || opcode == OP_CALLC || opcode == OP_CALLU) {
-            bool taken = opcode == OP_CALL ||
-                         (opcode == OP_CALLC ? evaluateCondition(instr)
-                                             : boolUniform(bits(instr, 22u, 4u)));
-            if (taken) {
-                if (call_top < 4) {
-                    call_end[call_top] = target + count;
-                    call_return[call_top] = pc + 1u;
-                    call_top++;
+            case OP_DP3:
+#if SANITIZE_MUL
+                value = vec4(dot(vec3(sanitize_mul(a, b)), vec3(1.0)));
+#else
+                value = vec4(dot(vec3(a), vec3(b)));
+#endif
+                break;
+            case OP_DP4:
+#if SANITIZE_MUL
+                value = vec4(dot(sanitize_mul(a, b), vec4(1.0)));
+#else
+                value = vec4(dot(a, b));
+#endif
+                break;
+            case OP_DPH:
+#if SANITIZE_MUL
+                value = vec4(dot(sanitize_mul(vec4(a.xyz, 1.0), b), vec4(1.0)));
+#else
+                value = vec4(dot(a, b));
+#endif
+                break;
+            case OP_MAX:
+#if SANITIZE_MUL
+                value = mix(b, a, greaterThan(a, b));
+#else
+                value = max(a, b);
+#endif
+                break;
+            case OP_MIN:
+#if SANITIZE_MUL
+                value = mix(b, a, lessThan(a, b));
+#else
+                value = min(a, b);
+#endif
+                break;
+            case OP_FLR:
+                value = floor(a);
+                break;
+            case OP_RCP:
+#if !SANITIZE_MUL
+                write = a.x != 0.0;
+#endif
+                value = vec4(1.0 / a.x);
+                break;
+            case OP_RSQ:
+#if !SANITIZE_MUL
+                write = a.x > 0.0;
+#endif
+                value = vec4(inversesqrt(a.x));
+                break;
+            case OP_SGE:
+                value = vec4(greaterThanEqual(a, b));
+                break;
+            case OP_SLT:
+                value = vec4(lessThan(a, b));
+                break;
+            case OP_EX2:
+                value = vec4(exp2(a.x));
+                break;
+            case OP_LG2:
+                value = vec4(log2(a.x));
+                break;
+            case OP_MOVA: {
+                ivec2 address = ivec2(a);
+                if ((mask & 8u) != 0u) {
+                    address_registers.y = address.x;
                 }
-                pc = target - 1u;
+                if ((mask & 4u) != 0u) {
+                    address_registers.z = address.y;
+                }
+                write = false;
+                break;
             }
-        } else if (opcode == OP_IFU || opcode == OP_IFC) {
-            bool taken = opcode == OP_IFC ? evaluateCondition(instr)
-                                          : boolUniform(bits(instr, 22u, 4u));
-            if (!taken) {
-                pc = target - 1u;
-            } else if (if_top < 8) {
-                if_else[if_top] = target;
-                if_end[if_top] = target + count;
-                if_top++;
+            case OP_CMP:
+                conditional_code = bvec2(compare(dest & 7u, a.x, b.x), compare(dest >> 3, a.y, b.y));
+                write = false;
+                break;
+            default:
+                break;
             }
-        } else if (opcode == OP_LOOP) {
-            uvec4 loop = uniforms.i[bits(instr, 22u, 2u)];
-            if (loop_top < 4) {
-                loop_entry[loop_top] = pc + 1u;
-                loop_end[loop_top] = target + 1u;
-                loop_count[loop_top] = loop.x;
-                loop_step[loop_top] = loop.z;
-                loop_previous[loop_top] = int(loop.y);
-                loop_top++;
+            if (write) {
+                bvec4 lanes = notEqual(uvec4(mask) & uvec4(8u, 4u, 2u, 1u), uvec4(0u));
+                regs[dest] = mix(regs[dest], value, lanes);
             }
-            address_registers.z = int(loop.y);
-        } else if (opcode == OP_BREAK) {
-            is_break = true;
-        } else if (opcode == OP_BREAKC) {
-            is_break = evaluateCondition(instr);
+        } else {
+            uint target = ins.y & 0xFFFu;
+            uint count = bits(ins.y, 12u, 8u);
+            uint flow = bits(ins.y, 20u, 4u);
+            if (op == OP_END) {
+                return;
+            } else if (op == OP_JMPC) {
+                if (evaluateCondition(flow)) {
+                    pc = target;
+                }
+            } else if (op == OP_JMPU) {
+                if (boolUniform(flow) == ((count & 1u) == 0u)) {
+                    pc = target;
+                }
+            } else if (op == OP_CALL || op == OP_CALLC || op == OP_CALLU) {
+                bool taken = op == OP_CALL ||
+                             (op == OP_CALLC ? evaluateCondition(flow) : boolUniform(flow));
+                if (taken) {
+                    if (call_top < 4) {
+                        call_end[call_top] = target + count;
+                        call_return[call_top] = old_pc + 1u;
+                        call_top++;
+                    }
+                    pc = target;
+                }
+            } else if (op == OP_IFU || op == OP_IFC) {
+                bool taken = op == OP_IFC ? evaluateCondition(flow) : boolUniform(flow);
+                if (!taken) {
+                    pc = target;
+                } else if (if_top < 8) {
+                    if_else[if_top] = target;
+                    if_end[if_top] = target + count;
+                    if_top++;
+                }
+            } else if (op == OP_LOOP) {
+                uvec4 loop = uniforms.i[flow & 3u];
+                if (loop_top < 4) {
+                    loop_entry[loop_top] = old_pc + 1u;
+                    loop_end[loop_top] = target + 1u;
+                    loop_count[loop_top] = loop.x;
+                    loop_step[loop_top] = loop.z;
+                    loop_previous[loop_top] = int(loop.y);
+                    loop_top++;
+                }
+                address_registers.w = int(loop.y);
+            } else if (op == OP_BREAK) {
+                is_break = true;
+            } else if (op == OP_BREAKC) {
+                is_break = evaluateCondition(flow);
+            }
         }
 
-        pc++;
+        // The top bit is set on the last instruction of every call, if and loop block
+        if ((ins.x >> 31) == 0u && !is_break) {
+            continue;
+        }
         uint next_pc = old_pc + 1u;
         for (int i = 0; i < 4; i++) {
             if (call_top == 0 || call_end[call_top - 1] != next_pc) {
@@ -623,14 +628,14 @@ void runProgram() {
         }
         if (loop_top > 0 && (loop_end[loop_top - 1] == old_pc + 1u || is_break)) {
             int top = loop_top - 1;
-            address_registers.z += int(loop_step[top]);
+            address_registers.w += int(loop_step[top]);
             if (!is_break && loop_count[top] != 0u) {
                 loop_count[top]--;
                 pc = loop_entry[top];
             } else {
                 pc = loop_end[top];
                 if (loop_top > 1) {
-                    address_registers.z = loop_previous[top];
+                    address_registers.w = loop_previous[top];
                 }
                 loop_top--;
             }
@@ -640,14 +645,16 @@ void runProgram() {
 
 float semantic(uint slot) {
     uint map = interp_semantic_map[slot >> 2][slot & 3u];
-    return map < 64u ? reg_out[map >> 2][map & 3u] : 1.0;
+    return map < 0xFFu ? regs[map >> 2][map & 3u] : 1.0;
 }
 
 void main() {
-    for (uint i = 0u; i < 16u; i++) {
-        reg_in[i] = loadAttribute(interp_attributes[i]);
-        reg_tmp[i] = vec4(0.0, 0.0, 0.0, 1.0);
-        reg_out[i] = vec4(0.0, 0.0, 0.0, 1.0);
+    for (uint i = 0u; i < REG_COUNT; i++) {
+        regs[i] = vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    for (uint pending = interp_config.y; pending != 0u; pending &= pending - 1u) {
+        uint i = uint(findLSB(pending));
+        regs[i] = loadAttribute(interp_attributes[i]);
     }
 
     runProgram();
@@ -688,16 +695,228 @@ POSITION_OUTPUT
 
 void PackVertexInterpreterConfig(const PicaVSConfig& config, VSUniformData& data) {
     const auto& state = config.state;
-    data.interp_config = {state.main_offset, state.num_outputs, 0u, 0u};
+    data.interp_config = {state.main_offset, 0u, 0u, 0u};
+
+    // Output attribute -> the register that writes it
+    std::array<u32, 16> registers;
+    registers.fill(INTERP_REG_DEFAULT);
     for (u32 reg = 0; reg < 16; reg++) {
-        data.interp_output_map[reg / 4][reg % 4] = state.output_map[reg];
+        if (state.output_map[reg] < state.num_outputs) {
+            registers[state.output_map[reg]] = INTERP_REG_OUTPUT + reg;
+        }
     }
     const auto semantic_maps = state.gs_state.GetSemanticMaps();
     for (u32 slot = 0; slot < semantic_maps.size(); slot++) {
         const auto& map = semantic_maps[slot];
-        const bool mapped = map.attribute_index < state.gs_state.gs_output_attributes_count;
+        const bool mapped = map.attribute_index < state.gs_state.gs_output_attributes_count &&
+                            map.attribute_index < registers.size();
         data.interp_semantic_map[slot / 4][slot % 4] =
-            mapped ? map.attribute_index * 4 + map.component_index : 0xFFu;
+            mapped ? registers[map.attribute_index] * 4 + map.component_index : 0xFFu;
+    }
+}
+
+void DecodeVertexProgram(std::span<const u32> code, std::span<const u32> swizzles,
+                         VSInterpreterProgram& program) {
+    using OpCode = nihstro::OpCode::Id;
+    using CompareOp = nihstro::Instruction::Common::CompareOpType::Op;
+    const auto bits = [](u32 word, u32 shift, u32 count) {
+        return (word >> shift) & ((1u << count) - 1);
+    };
+    const auto id = [](OpCode opcode) { return static_cast<u32>(opcode); };
+
+    // Addresses right after the end of a call, if or loop block
+    std::bitset<4096 + 1> block_ends;
+    for (const u32 instr : code) {
+        const u32 target = bits(instr, 10, 12);
+        u32 end;
+        switch (static_cast<OpCode>(instr >> 26)) {
+        case OpCode::CALL:
+        case OpCode::CALLC:
+        case OpCode::CALLU:
+            end = target + bits(instr, 0, 8);
+            break;
+        case OpCode::IFU:
+        case OpCode::IFC:
+            end = target;
+            break;
+        case OpCode::LOOP:
+            end = target + 1;
+            break;
+        default:
+            continue;
+        }
+        if (end < block_ends.size()) {
+            block_ends.set(end);
+        }
+    }
+
+    struct Operand {
+        u32 reg;
+        u32 selector;
+        u32 negate;
+    };
+    // index: 0-2 for src1-src3 of the operand descriptor
+    const auto operand = [&](u32 pattern, u32 index, u32 reg) {
+        const u32 shift = 4 + index * 9;
+        return Operand{reg, bits(pattern, shift + 1, 8), bits(pattern, shift, 1)};
+    };
+    const auto pack = [](InterpOp op, u32 dest, u32 mask, u32 address, const Operand& a,
+                         const Operand& b, const Operand& c) {
+        return std::array<u32, 2>{
+            static_cast<u32>(op) | dest << 5 | mask << 11 | address << 15 | a.reg << 17 |
+                b.reg << 24,
+            c.reg | a.selector << 5 | b.selector << 13 | c.selector << 21 | a.negate << 29 |
+                b.negate << 30 | c.negate << 31,
+        };
+    };
+    const auto dest_register = [](u32 dest) { return dest < 16 ? INTERP_REG_OUTPUT + dest : dest; };
+
+    const u32 length = static_cast<u32>(std::min(code.size(), program.code.size() / 2));
+    for (u32 pc = 0; pc < length; pc++) {
+        const u32 instr = code[pc];
+        const u32 opcode = instr >> 26;
+        std::array<u32, 2> words{static_cast<u32>(InterpOp::Nop), 0};
+
+        if (opcode >= id(OpCode::MADI)) {
+            const bool inverted = opcode < id(OpCode::MAD);
+            const u32 pattern = swizzles[bits(instr, 0, 5)];
+            const u32 src2 = inverted ? bits(instr, 12, 5) : bits(instr, 10, 7);
+            const u32 src3 = inverted ? bits(instr, 5, 7) : bits(instr, 5, 5);
+            // src1 can't be a uniform, so it takes the narrow slot
+            words = pack(InterpOp::Mad, dest_register(bits(instr, 24, 5)), pattern & 0xF,
+                         bits(instr, 22, 2), operand(pattern, 1, src2), operand(pattern, 2, src3),
+                         operand(pattern, 0, bits(instr, 17, 5)));
+        } else if (opcode == id(OpCode::CMP) || opcode == id(OpCode::CMP) + 1) {
+            const u32 pattern = swizzles[bits(instr, 0, 7)];
+            const u32 op_x = bits(instr, 24, 3);
+            const u32 op_y = bits(instr, 21, 3);
+            const u32 last = static_cast<u32>(CompareOp::GreaterEqual);
+            if (op_x <= last && op_y <= last) {
+                // The compare ops go in the dest field
+                words = pack(InterpOp::Cmp, op_x | op_y << 3, 0, bits(instr, 19, 2),
+                             operand(pattern, 0, bits(instr, 12, 7)),
+                             operand(pattern, 1, bits(instr, 7, 5)), {});
+            }
+        } else if (opcode < id(OpCode::BREAK)) {
+            InterpOp op = InterpOp::Nop;
+            bool inverted = false;
+            switch (static_cast<OpCode>(opcode)) {
+            case OpCode::ADD:
+                op = InterpOp::Add;
+                break;
+            case OpCode::DP3:
+                op = InterpOp::Dp3;
+                break;
+            case OpCode::DP4:
+                op = InterpOp::Dp4;
+                break;
+            case OpCode::DPHI:
+                inverted = true;
+                [[fallthrough]];
+            case OpCode::DPH:
+                op = InterpOp::Dph;
+                break;
+            case OpCode::EX2:
+                op = InterpOp::Ex2;
+                break;
+            case OpCode::LG2:
+                op = InterpOp::Lg2;
+                break;
+            case OpCode::MUL:
+                op = InterpOp::Mul;
+                break;
+            case OpCode::SGEI:
+                inverted = true;
+                [[fallthrough]];
+            case OpCode::SGE:
+                op = InterpOp::Sge;
+                break;
+            case OpCode::SLTI:
+                inverted = true;
+                [[fallthrough]];
+            case OpCode::SLT:
+                op = InterpOp::Slt;
+                break;
+            case OpCode::FLR:
+                op = InterpOp::Flr;
+                break;
+            case OpCode::MAX:
+                op = InterpOp::Max;
+                break;
+            case OpCode::MIN:
+                op = InterpOp::Min;
+                break;
+            case OpCode::RCP:
+                op = InterpOp::Rcp;
+                break;
+            case OpCode::RSQ:
+                op = InterpOp::Rsq;
+                break;
+            case OpCode::MOVA:
+                op = InterpOp::Mova;
+                break;
+            case OpCode::MOV:
+                op = InterpOp::Mov;
+                break;
+            default:
+                break;
+            }
+            if (op != InterpOp::Nop) {
+                const u32 pattern = swizzles[bits(instr, 0, 7)];
+                const u32 src1 = inverted ? bits(instr, 14, 5) : bits(instr, 12, 7);
+                const u32 src2 = inverted ? bits(instr, 7, 7) : bits(instr, 7, 5);
+                words =
+                    pack(op, dest_register(bits(instr, 21, 5)), pattern & 0xF, bits(instr, 19, 2),
+                         operand(pattern, 0, src1), operand(pattern, 1, src2), {});
+            }
+        } else {
+            InterpOp op = InterpOp::Nop;
+            switch (static_cast<OpCode>(opcode)) {
+            case OpCode::END:
+                op = InterpOp::End;
+                break;
+            case OpCode::JMPC:
+                op = InterpOp::Jmpc;
+                break;
+            case OpCode::JMPU:
+                op = InterpOp::Jmpu;
+                break;
+            case OpCode::CALL:
+                op = InterpOp::Call;
+                break;
+            case OpCode::CALLC:
+                op = InterpOp::Callc;
+                break;
+            case OpCode::CALLU:
+                op = InterpOp::Callu;
+                break;
+            case OpCode::IFU:
+                op = InterpOp::Ifu;
+                break;
+            case OpCode::IFC:
+                op = InterpOp::Ifc;
+                break;
+            case OpCode::LOOP:
+                op = InterpOp::Loop;
+                break;
+            case OpCode::BREAK:
+                op = InterpOp::Break;
+                break;
+            case OpCode::BREAKC:
+                op = InterpOp::Breakc;
+                break;
+            default:
+                break;
+            }
+            words = {static_cast<u32>(op),
+                     bits(instr, 10, 12) | bits(instr, 0, 8) << 12 | bits(instr, 22, 4) << 20};
+        }
+
+        if (block_ends[pc + 1]) {
+            words[0] |= 1u << 31;
+        }
+        program.code[2 * pc] = words[0];
+        program.code[2 * pc + 1] = words[1];
     }
 }
 
