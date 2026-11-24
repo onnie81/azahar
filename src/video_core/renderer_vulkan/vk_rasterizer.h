@@ -118,7 +118,7 @@ private:
     bool UseFragmentInterpreter();
 
     /// Binds the vertex interpreter and uploads its program and attribute layout
-    void UseVertexInterpreter();
+    bool UseVertexInterpreter();
 
     /// Switches the draw to the interpreters if its pipeline isn't built yet
     void HandOffToInterpreter(bool accelerate);
@@ -144,6 +144,7 @@ private:
 
     StreamBuffer stream_buffer;     ///< Vertex+Index buffer
     StreamBuffer uniform_buffer;    ///< Uniform buffer
+    StreamBuffer program_buffer;    ///< Decoded programs of the vertex interpreter
     StreamBuffer texture_buffer;    ///< Texture buffer
     StreamBuffer texture_lf_buffer; ///< Texture Light-Fog buffer
     vk::UniqueBufferView texture_lf_view;
@@ -156,7 +157,7 @@ private:
     bool async_shaders{false};
     bool interpreter_handoff{false};
     bool interpret_fragments{false};
-    /// Offsets of the decoded vertex programs in the uniform buffer, by program hash
+    /// Offsets of the decoded vertex programs in their buffer, by program hash
     std::unordered_map<u64, u32> interpreter_programs;
 };
 
