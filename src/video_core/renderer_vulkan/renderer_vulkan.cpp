@@ -1500,6 +1500,8 @@ std::string RendererVulkan::GetDriverInfo() {
     if (const auto parts = rasterizer.GetPipelineCache().GetLibraryParts()) {
         info += fmt::format(" (Lib: {} VS {} FS)", parts->first, parts->second);
     }
+    const auto [shadow_writes, shadow_reads] = rasterizer.GetShadowDraws();
+    info += fmt::format(" Shadow: {} W {} R", shadow_writes, shadow_reads);
     return info;
 }
 

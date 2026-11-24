@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <unordered_map>
 
 #include "video_core/rasterizer_accelerated.h"
@@ -72,6 +73,11 @@ public:
         return pipeline_cache;
     }
 
+    /// The draws that rendered a shadow map and the draws that sampled one
+    std::pair<u64, u64> GetShadowDraws() const {
+        return {shadow_writes.load(), shadow_reads.load()};
+    }
+
 private:
     /// Syncs pipeline state from PICA registers
     void SyncDrawState();
@@ -136,6 +142,8 @@ private:
     RenderManager& renderpass_cache;
     DescriptorUpdateQueue& update_queue;
     PipelineCache pipeline_cache;
+    std::atomic<u64> shadow_writes{};
+    std::atomic<u64> shadow_reads{};
     TextureRuntime runtime;
     RasterizerCache res_cache;
 

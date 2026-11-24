@@ -690,6 +690,9 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
 
     const bool shadow_rendering = regs.framebuffer.IsShadowRendering();
     const bool has_stencil = regs.framebuffer.HasStencil();
+    if (shadow_rendering) {
+        shadow_writes++;
+    }
 
     const bool write_color_fb = shadow_rendering || pipeline_info.GetFinalColorWriteMask(instance);
     const bool write_depth_fb = pipeline_info.IsDepthWriteEnabled();
@@ -865,6 +868,7 @@ void RasterizerVulkan::SyncTextureUnits(const Framebuffer* framebuffer) {
         if (texture_index == 0) {
             switch (texture.config.type.Value()) {
             case TextureType::Shadow2D: {
+                shadow_reads++;
                 Surface& surface = res_cache.GetTextureSurface(texture);
                 Sampler& sampler = res_cache.GetSampler(texture.config);
                 surface.flags |= VideoCore::SurfaceFlagBits::ShadowSource;
@@ -873,6 +877,7 @@ void RasterizerVulkan::SyncTextureUnits(const Framebuffer* framebuffer) {
                 continue;
             }
             case TextureType::ShadowCube: {
+                shadow_reads++;
                 BindShadowCube(texture, texture_set);
                 continue;
             }
