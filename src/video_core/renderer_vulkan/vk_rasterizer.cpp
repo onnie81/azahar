@@ -611,7 +611,7 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
             of_open_pass ? renderpass_cache.DepthFormat() : framebuffer->Format(SurfaceType::Depth);
         attachments.sample_count = framebuffer->Samples();
     };
-    const bool pass_covers = renderpass_cache.Covers(framebuffer);
+    const bool pass_covers = renderpass_cache.Covers(framebuffer, draw_rect);
     use_attachments(pass_covers);
     if (!using_color_fb) {
         pipeline_info.state.blending.color_write_mask = 0;
@@ -657,7 +657,7 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
     UploadUniforms(accelerate);
 
     // Begin rendering
-    use_attachments(renderpass_cache.BeginRendering(framebuffer));
+    use_attachments(renderpass_cache.BeginRendering(framebuffer, draw_rect));
 
     // Configure viewport and scissor
     const auto viewport = fb_helper.Viewport();
