@@ -20,6 +20,7 @@ enum class IntSetting(
     CAMERA_OUTER_LEFT_FLIP(SettingKeys.camera_outer_left_flip(), CitraSettings.SECTION_CAMERA, 0),
     CAMERA_OUTER_RIGHT_FLIP(SettingKeys.camera_outer_right_flip(), CitraSettings.SECTION_CAMERA, 0),
     GRAPHICS_API(SettingKeys.graphics_api(), CitraSettings.SECTION_RENDERER, 2),
+    ASYNC_SHADERS(SettingKeys.async_shader_compilation(), CitraSettings.SECTION_RENDERER, 0),
     RESOLUTION_FACTOR(SettingKeys.resolution_factor(), CitraSettings.SECTION_RENDERER, 1),
     STEREOSCOPIC_3D_MODE(SettingKeys.render_3d(), CitraSettings.SECTION_RENDERER, 2),
     STEREOSCOPIC_3D_DEPTH(SettingKeys.factor_3d(), CitraSettings.SECTION_RENDERER, 0),
@@ -124,6 +125,7 @@ enum class IntSetting(
             EMULATED_REGION,
             INIT_CLOCK,
             GRAPHICS_API,
+            ASYNC_SHADERS,
             AUDIO_INPUT_TYPE
         )
 

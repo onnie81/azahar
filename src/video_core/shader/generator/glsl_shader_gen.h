@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include "video_core/shader/generator/shader_gen.h"
+#include "video_core/shader/generator/shader_uniforms.h"
+
 // High precision may or may not be supported in GLES3. If it isn't, use medium precision instead.
 static constexpr char fragment_shader_precision_OES[] = R"(
 #if GL_ES
@@ -40,6 +43,12 @@ namespace Pica::Shader::Generator::GLSL {
  * @returns String of the shader source code
  */
 std::string GenerateTrivialVertexShader(bool use_clip_planes, bool separable_shader);
+
+/// Generates the vertex shader that runs a PICA vertex program from a uniform block
+std::string GenerateVertexInterpreter(bool use_clip_planes, bool sanitize_mul);
+
+/// Fills the vertex interpreter part of the vs uniform block
+void PackVertexInterpreterConfig(const PicaVSConfig& config, VSUniformData& data);
 
 /**
  * Generates the GLSL vertex shader program source code for the given VS program
