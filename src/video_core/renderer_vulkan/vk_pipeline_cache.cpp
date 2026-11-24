@@ -65,7 +65,7 @@ constexpr std::array<vk::DescriptorSetLayoutBinding, 8> BUFFER_BINDINGS = {{
     {3, vk::DescriptorType::eUniformTexelBuffer, 1, vk::ShaderStageFlagBits::eFragment},
     {4, vk::DescriptorType::eUniformTexelBuffer, 1, vk::ShaderStageFlagBits::eFragment},
     {5, vk::DescriptorType::eUniformTexelBuffer, 1, vk::ShaderStageFlagBits::eFragment},
-    // Vertex interpreter: program and vertex data
+    // Vertex interpreter: decoded program and vertex data
     {6, vk::DescriptorType::eUniformBufferDynamic, 1, vk::ShaderStageFlagBits::eVertex},
     {7, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eVertex},
 }};
