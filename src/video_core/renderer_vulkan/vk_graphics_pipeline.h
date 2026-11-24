@@ -278,6 +278,8 @@ struct DynamicPipelineInfo {
 
     Common::Rectangle<u32> scissor;
     Common::Rectangle<s32> viewport;
+    f32 min_depth = 0.f;
+    f32 max_depth = 1.f;
 
     bool operator==(const DynamicPipelineInfo& other) const noexcept {
         return std::memcmp(this, &other, sizeof(DynamicPipelineInfo)) == 0;
