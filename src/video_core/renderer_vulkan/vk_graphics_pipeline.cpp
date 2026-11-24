@@ -203,7 +203,7 @@ PipelineState::PipelineState(const Instance& instance, PipelineInfo info) {
 
     multisampling = vk::PipelineMultisampleStateCreateInfo{
         .rasterizationSamples = vk::SampleCountFlagBits(info.state.attachments.sample_count),
-        .sampleShadingEnable = true,
+        .sampleShadingEnable = info.state.attachments.sample_count > 1,
         .minSampleShading = 1.0f,
     };
 
