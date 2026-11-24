@@ -608,6 +608,9 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
 
     // Sync and bind the shader
     pipeline_cache.UseFragmentShader(regs, user_config);
+    const auto depth_range = Pica::Shader::ViewportDepthRange(regs);
+    pipeline_info.dynamic_info.min_depth = depth_range ? depth_range->first : 0.f;
+    pipeline_info.dynamic_info.max_depth = depth_range ? depth_range->second : 1.f;
 
     // Sync the LUTs within the texture buffer
     SyncAndUploadLUTs();
