@@ -481,6 +481,9 @@ bool RasterizerVulkan::UseFragmentInterpreter() {
     fs_data_dirty |= std::memcmp(previous.data(), packed, previous.size()) != 0;
 
     pipeline_cache.UseFragmentInterpreter(static_cast<u32>(*variant));
+    // The fragment interpreter writes the depth by itself
+    pipeline_info.dynamic_info.min_depth = 0.f;
+    pipeline_info.dynamic_info.max_depth = 1.f;
     return true;
 }
 
@@ -717,6 +720,9 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
 
     // Sync and bind the shader
     pipeline_cache.UseFragmentShader(regs, user_config);
+    const auto depth_range = Pica::Shader::ViewportDepthRange(regs);
+    pipeline_info.dynamic_info.min_depth = depth_range ? depth_range->first : 0.f;
+    pipeline_info.dynamic_info.max_depth = depth_range ? depth_range->second : 1.f;
     if (interpreter_handoff) {
         HandOffToInterpreter(accelerate);
     }
