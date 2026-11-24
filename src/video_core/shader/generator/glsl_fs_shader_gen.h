@@ -4,7 +4,9 @@
 
 #pragma once
 
+#include <optional>
 #include "video_core/shader/generator/pica_fs_config.h"
+#include "video_core/shader/generator/shader_uniforms.h"
 
 namespace Pica::Shader::Generator::GLSL {
 
@@ -100,5 +102,29 @@ private:
  */
 std::string GenerateFragmentShader(const FSConfig& config, const UserConfig& user,
                                    const Profile& profile);
+
+/// Fragment interpreter variants, one per texture 0 type plus shadow rendering
+enum class InterpreterVariant : u32 {
+    Texture2D,
+    TextureCube,
+    Shadow2D,
+    ShadowRendering,
+    Count,
+};
+
+/**
+ * Generates a fragment shader that takes the TEV, lighting and fog state from the uniform block
+ * @returns String of the shader source code
+ */
+std::string GenerateFragmentInterpreter(const Profile& profile, InterpreterVariant variant);
+
+/// Returns the interpreter variant that can draw the config, if any
+std::optional<InterpreterVariant> FragmentInterpreterVariant(const FSConfig& config,
+                                                             const UserConfig& user,
+                                                             const Profile& profile);
+
+/// Fills the interpreter part of the fs uniform block
+void PackFragmentInterpreterConfig(const FSConfig& config, const Profile& profile,
+                                   FSUniformData& data);
 
 } // namespace Pica::Shader::Generator::GLSL

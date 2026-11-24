@@ -13,7 +13,6 @@ enum class BooleanSetting(
 ) : AbstractSetting<Boolean> {
     EXPAND_TO_CUTOUT_AREA(SettingKeys.expand_to_cutout_area(), CitraSettings.SECTION_LAYOUT, false),
     SPIRV_SHADER_GEN(SettingKeys.spirv_shader_gen(), CitraSettings.SECTION_RENDERER, true),
-    ASYNC_SHADERS(SettingKeys.async_shader_compilation(), CitraSettings.SECTION_RENDERER, false),
     DISABLE_SPIRV_OPTIMIZER(
         SettingKeys.disable_spirv_optimizer(),
         CitraSettings.SECTION_RENDERER,
@@ -178,7 +177,6 @@ enum class BooleanSetting(
         private val NOT_RUNTIME_EDITABLE = listOf(
             PLUGIN_LOADER,
             ALLOW_PLUGIN_LOADER,
-            ASYNC_SHADERS,
             DELAY_START_LLE_MODULES,
             DETERMINISTIC_ASYNC_OPERATIONS,
             REQUIRED_ONLINE_LLE_MODULES,
