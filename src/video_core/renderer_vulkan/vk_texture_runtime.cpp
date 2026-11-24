@@ -349,6 +349,12 @@ bool TextureRuntime::Reinterpret(Surface& source, Surface& dest,
 }
 
 bool TextureRuntime::ClearTexture(Surface& surface, const VideoCore::TextureClear& clear) {
+    if (surface.texture_type == VideoCore::TextureType::Texture2D &&
+        surface.GetSampleCount() == 1 && clear.texture_level == 0 && clear.texture_layer == 0) {
+        renderpass_cache.Clear(surface, clear);
+        return true;
+    }
+
     renderpass_cache.EndRendering();
 
     const RecordParams params = {
