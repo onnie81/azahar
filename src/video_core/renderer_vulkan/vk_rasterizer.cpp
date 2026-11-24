@@ -478,43 +478,49 @@ bool RasterizerVulkan::UseFragmentInterpreter() {
 }
 
 void RasterizerVulkan::UseVertexInterpreter() {
-    using Pica::Shader::Generator::VSInterpreterProgram;
+    namespace Generator = Pica::Shader::Generator;
     auto& setup = pica.vs_setup;
 
     const u64 program_hash =
         Common::HashCombine(setup.GetProgramCodeHash(), setup.GetSwizzleDataHash());
-    if (interpreter_program_dirty || program_hash != interpreter_program_hash) {
+    auto it = interpreter_programs.find(program_hash);
+    if (it == interpreter_programs.end()) {
+        Generator::VSInterpreterProgram program;
+        Generator::GLSL::DecodeVertexProgram(setup.GetProgramCode(), setup.GetSwizzleData(),
+                                             program);
         const auto [data, offset, invalidate] =
-            uniform_buffer.Map(sizeof(VSInterpreterProgram), uniform_buffer_alignment);
-        const auto& code = setup.GetProgramCode();
-        const auto& swizzles = setup.GetSwizzleData();
-        std::memcpy(data, code.data(), sizeof(VSInterpreterProgram::code));
-        std::memcpy(data + sizeof(VSInterpreterProgram::code), swizzles.data(),
-                    sizeof(VSInterpreterProgram::swizzles));
-        uniform_buffer.Commit(sizeof(VSInterpreterProgram));
-        pipeline_cache.UpdateRange(3, offset);
-        interpreter_program_hash = program_hash;
-        interpreter_program_dirty = false;
+            uniform_buffer.Map(sizeof(program), uniform_buffer_alignment);
+        std::memcpy(data, &program, sizeof(program));
+        uniform_buffer.Commit(sizeof(program));
         if (invalidate) {
+            interpreter_programs.clear();
             vs_data_dirty = true;
             fs_data_dirty = true;
             setup.uniforms_dirty = true;
         }
+        it = interpreter_programs.emplace(program_hash, offset).first;
     }
+    pipeline_cache.UpdateRange(3, it->second);
 
-    Pica::Shader::Generator::GLSL::PackVertexInterpreterConfig(
-        Pica::Shader::Generator::PicaVSConfig{regs, setup}, vs_data);
+    Generator::GLSL::PackVertexInterpreterConfig(Generator::PicaVSConfig{regs, setup}, vs_data);
     VertexLayout& layout = pipeline_info.state.vertex_layout;
     const u32 stride_alignment = instance.GetMinVertexStrideAlignment();
+    u32 loaded = 0;
     for (u32 reg = 0; reg < 16; reg++) {
         const VertexAttribute& attribute = layout.attributes[reg];
         const VertexBinding& binding = layout.bindings[attribute.binding];
+        // Offset 0 of the fixed binding is the default attribute, registers start out with it
+        if (binding.fixed && attribute.offset == 0) {
+            continue;
+        }
         const u32 stride =
             binding.fixed ? 0 : Common::AlignUp<u32>(binding.byte_count, stride_alignment);
         vs_data.interp_attributes[reg] = {binding_offsets[attribute.binding] + attribute.offset,
                                           stride, static_cast<u32>(attribute.type.Value()),
                                           attribute.size};
+        loaded |= 1u << reg;
     }
+    vs_data.interp_config.y = loaded;
     vs_data_dirty = true;
 
     // No vertex input state, the shader pulls the vertices itself
@@ -1140,7 +1146,7 @@ void RasterizerVulkan::UploadUniforms(bool accelerate_draw) {
     u32 used_bytes = 0;
 
     if (invalidate) {
-        interpreter_program_dirty = true;
+        interpreter_programs.clear();
     }
 
     if (vs_data_dirty || invalidate) {
