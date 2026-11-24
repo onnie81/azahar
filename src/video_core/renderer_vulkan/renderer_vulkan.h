@@ -80,6 +80,8 @@ public:
 
     void NotifySurfaceChanged(bool second) override;
 
+    std::string GetDriverInfo() override;
+
     void SwapBuffers() override;
     void TryPresent(int timeout_ms, bool is_secondary) override {}
 

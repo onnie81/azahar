@@ -1043,6 +1043,15 @@ jdoubleArray Java_org_citra_citra_1emu_NativeLibrary_getPerfStats(JNIEnv* env,
     return j_stats;
 }
 
+jstring Java_org_citra_citra_1emu_NativeLibrary_getDriverInfo(JNIEnv* env,
+                                                              [[maybe_unused]] jobject obj) {
+    auto& core = Core::System::GetInstance();
+    if (!core.IsPoweredOn()) {
+        return ToJString(env, "");
+    }
+    return ToJString(env, core.GPU().Renderer().GetDriverInfo());
+}
+
 void Java_org_citra_citra_1emu_NativeLibrary_run__Ljava_lang_String_2(JNIEnv* env,
                                                                       [[maybe_unused]] jobject obj,
                                                                       jstring j_path) {

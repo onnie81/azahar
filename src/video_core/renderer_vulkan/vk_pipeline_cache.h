@@ -101,6 +101,9 @@ public:
     /// Returns true if an interpreter shader failed to compile
     bool InterpretersFailed();
 
+    /// The shader parts of the pipeline libraries, when the pipelines are built from them
+    std::optional<std::pair<u32, u32>> GetLibraryParts() const;
+
     /// Returns true if the pipeline for the bound shaders is built, queues it otherwise
     bool IsPipelineReady(PipelineInfo& info, bool prioritize = false);
 
