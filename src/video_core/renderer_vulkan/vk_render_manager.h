@@ -8,6 +8,7 @@
 #include <mutex>
 
 #include "common/math_util.h"
+#include "video_core/rasterizer_cache/pixel_format.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
 namespace VideoCore {
@@ -45,8 +46,23 @@ public:
     explicit RenderManager(const Instance& instance, Scheduler& scheduler);
     ~RenderManager();
 
-    /// Begins a new renderpass with the provided framebuffer as render target.
-    void BeginRendering(const Framebuffer* framebuffer, Common::Rectangle<u32> draw_rect);
+    /// Renders to the framebuffer, in the pass that is open if it has those attachments and
+    /// in a new one otherwise. Returns whether the pass went on with an attachment more
+    bool BeginRendering(const Framebuffer* framebuffer);
+
+    /// Whether the pass that is open has the attachments of the framebuffer
+    bool Covers(const Framebuffer* framebuffer) const;
+
+    /// The attachments of the pass that is open
+    VideoCore::PixelFormat ColorFormat() const noexcept {
+        return formats[0];
+    }
+    VideoCore::PixelFormat DepthFormat() const noexcept {
+        return formats[1];
+    }
+    vk::ImageView ColorView() const noexcept {
+        return views[0];
+    }
 
     /// Begins a new renderpass with the provided render state.
     void BeginRendering(const RenderPass& new_pass);
@@ -77,6 +93,10 @@ private:
     std::array<vk::Image, 4> images;
     std::array<vk::ImageAspectFlags, 4> aspects;
     bool shadow_rendering{};
+    std::array<vk::ImageView, 2> views{};
+    std::array<VideoCore::PixelFormat, 2> formats{VideoCore::PixelFormat::Invalid,
+                                                  VideoCore::PixelFormat::Invalid};
+    u8 samples{1};
     RenderPass pass{};
     u32 num_draws{};
 };
