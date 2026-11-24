@@ -12,6 +12,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_render_manager.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "video_core/shader/generator/shader_gen.h"
 
 namespace Vulkan {
 
@@ -76,10 +77,11 @@ GraphicsPipeline::GraphicsPipeline(const Instance& instance_, RenderManager& ren
                                    const PipelineInfo& info_, vk::PipelineCache pipeline_cache_,
                                    vk::PipelineLayout layout_, std::array<Shader*, 3> stages_,
                                    Common::ThreadWorker* worker_,
-                                   Common::ThreadWorker* waited_worker_)
+                                   Common::ThreadWorker* waited_worker_,
+                                   PipelineLibraries* libraries_)
     : instance{instance_}, renderpass_cache{renderpass_cache_}, worker{worker_},
-      waited_worker{waited_worker_}, pipeline_layout{layout_}, pipeline_cache{pipeline_cache_},
-      info{info_}, stages{stages_} {}
+      waited_worker{waited_worker_}, libraries{libraries_}, pipeline_layout{layout_},
+      pipeline_cache{pipeline_cache_}, info{info_}, stages{stages_} {}
 
 GraphicsPipeline::~GraphicsPipeline() = default;
 
@@ -102,8 +104,10 @@ bool GraphicsPipeline::TryBuild(bool wait_built, bool prioritize) {
         return false;
     }
 
-    // Ask the driver if it can give us the pipeline quickly.
-    if (!shaders_pending && instance.IsPipelineCreationCacheControlSupported() && Build(true)) {
+    // Ask the driver if it can give us the pipeline quickly. From parts it only takes the
+    // vertex shader to be built already.
+    if (!shaders_pending && (libraries || instance.IsPipelineCreationCacheControlSupported()) &&
+        Build(true)) {
         return true;
     }
 
@@ -121,11 +125,32 @@ void GraphicsPipeline::BuildOnce() {
     }
 }
 
-bool GraphicsPipeline::Build(bool fail_on_compile_required) {
-    MICROPROFILE_SCOPE(Vulkan_Pipeline);
+namespace {
 
-    const u32 stride_alignment = instance.GetMinVertexStrideAlignment();
+/// The fixed-function state of a pipeline, as Vulkan takes it
+struct PipelineState {
+    PipelineState(const Instance& instance, PipelineInfo info);
+    PipelineState(const PipelineState&) = delete;
+    PipelineState& operator=(const PipelineState&) = delete;
+
     std::array<vk::VertexInputBindingDescription, MAX_VERTEX_BINDINGS> bindings;
+    std::array<vk::VertexInputAttributeDescription, MAX_VERTEX_ATTRIBUTES> attributes;
+    vk::PipelineVertexInputStateCreateInfo vertex_input_info;
+    vk::PipelineInputAssemblyStateCreateInfo input_assembly;
+    vk::PipelineRasterizationStateCreateInfo raster_state;
+    vk::PipelineMultisampleStateCreateInfo multisampling;
+    vk::PipelineColorBlendAttachmentState colorblend_attachment;
+    vk::PipelineColorBlendStateCreateInfo color_blending;
+    vk::Viewport viewport;
+    vk::Rect2D scissor;
+    vk::PipelineViewportStateCreateInfo viewport_info;
+    boost::container::static_vector<vk::DynamicState, 14> dynamic_states;
+    vk::PipelineDynamicStateCreateInfo dynamic_info;
+    vk::PipelineDepthStencilStateCreateInfo depth_info;
+};
+
+PipelineState::PipelineState(const Instance& instance, PipelineInfo info) {
+    const u32 stride_alignment = instance.GetMinVertexStrideAlignment();
     for (u32 i = 0; i < info.state.vertex_layout.binding_count; i++) {
         const auto& binding = info.state.vertex_layout.bindings[i];
         bindings[i] = vk::VertexInputBindingDescription{
@@ -136,7 +161,6 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         };
     }
 
-    std::array<vk::VertexInputAttributeDescription, MAX_VERTEX_ATTRIBUTES> attributes;
     for (u32 i = 0; i < info.state.vertex_layout.attribute_count; i++) {
         const auto& attr = info.state.vertex_layout.attributes[i];
         const FormatTraits& traits = instance.GetTraits(attr.type, attr.size);
@@ -155,19 +179,19 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         }
     }
 
-    const vk::PipelineVertexInputStateCreateInfo vertex_input_info = {
+    vertex_input_info = vk::PipelineVertexInputStateCreateInfo{
         .vertexBindingDescriptionCount = info.state.vertex_layout.binding_count,
         .pVertexBindingDescriptions = bindings.data(),
         .vertexAttributeDescriptionCount = info.state.vertex_layout.attribute_count,
         .pVertexAttributeDescriptions = attributes.data(),
     };
 
-    const vk::PipelineInputAssemblyStateCreateInfo input_assembly = {
+    input_assembly = vk::PipelineInputAssemblyStateCreateInfo{
         .topology = PicaToVK::PrimitiveTopology(info.state.rasterization.topology),
         .primitiveRestartEnable = false,
     };
 
-    const vk::PipelineRasterizationStateCreateInfo raster_state = {
+    raster_state = vk::PipelineRasterizationStateCreateInfo{
         .depthClampEnable = false,
         .rasterizerDiscardEnable = false,
         .cullMode = PicaToVK::CullMode(info.state.rasterization.cull_mode,
@@ -177,7 +201,7 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         .lineWidth = 1.0f,
     };
 
-    const vk::PipelineMultisampleStateCreateInfo multisampling = {
+    multisampling = vk::PipelineMultisampleStateCreateInfo{
         .rasterizationSamples = vk::SampleCountFlagBits(info.state.attachments.sample_count),
         .sampleShadingEnable = true,
         .minSampleShading = 1.0f,
@@ -204,7 +228,7 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         alpha_op = vk::BlendOp::eAdd;
     }
 
-    const vk::PipelineColorBlendAttachmentState colorblend_attachment = {
+    colorblend_attachment = vk::PipelineColorBlendAttachmentState{
         .blendEnable = blending.blend_enable,
         .srcColorBlendFactor = src_color_factor,
         .dstColorBlendFactor = dst_color_factor,
@@ -216,15 +240,16 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
             static_cast<vk::ColorComponentFlags>(info.GetFinalColorWriteMask(instance)),
     };
 
-    const vk::PipelineColorBlendStateCreateInfo color_blending = {
+    color_blending = vk::PipelineColorBlendStateCreateInfo{
         .logicOpEnable = !info.state.blending.blend_enable && !instance.NeedsLogicOpEmulation(),
         .logicOp = PicaToVK::LogicOp(info.state.blending.logic_op),
-        .attachmentCount = 1,
+        .attachmentCount =
+            info.state.attachments.color != VideoCore::PixelFormat::Invalid ? 1u : 0u,
         .pAttachments = &colorblend_attachment,
         .blendConstants = std::array{1.0f, 1.0f, 1.0f, 1.0f},
     };
 
-    const vk::Viewport viewport = {
+    viewport = vk::Viewport{
         .x = 0.0f,
         .y = 0.0f,
         .width = 1.0f,
@@ -233,19 +258,19 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         .maxDepth = 1.0f,
     };
 
-    const vk::Rect2D scissor = {
+    scissor = vk::Rect2D{
         .offset = {0, 0},
         .extent = {1, 1},
     };
 
-    const vk::PipelineViewportStateCreateInfo viewport_info = {
+    viewport_info = vk::PipelineViewportStateCreateInfo{
         .viewportCount = 1,
         .pViewports = &viewport,
         .scissorCount = 1,
         .pScissors = &scissor,
     };
 
-    boost::container::static_vector<vk::DynamicState, 14> dynamic_states = {
+    dynamic_states = {
         vk::DynamicState::eViewport,           vk::DynamicState::eScissor,
         vk::DynamicState::eStencilCompareMask, vk::DynamicState::eStencilWriteMask,
         vk::DynamicState::eStencilReference,   vk::DynamicState::eBlendConstants,
@@ -261,7 +286,7 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         dynamic_states.insert(dynamic_states.end(), extended.begin(), extended.end());
     }
 
-    const vk::PipelineDynamicStateCreateInfo dynamic_info = {
+    dynamic_info = vk::PipelineDynamicStateCreateInfo{
         .dynamicStateCount = static_cast<u32>(dynamic_states.size()),
         .pDynamicStates = dynamic_states.data(),
     };
@@ -273,7 +298,7 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         .compareOp = PicaToVK::CompareFunc(info.state.depth_stencil.stencil_compare_op),
     };
 
-    const vk::PipelineDepthStencilStateCreateInfo depth_info = {
+    depth_info = vk::PipelineDepthStencilStateCreateInfo{
         .depthTestEnable = static_cast<u32>(info.state.depth_stencil.depth_test_enable.Value()),
         .depthWriteEnable = static_cast<u32>(info.state.depth_stencil.depth_write_enable.Value()),
         .depthCompareOp = PicaToVK::CompareFunc(info.state.depth_stencil.depth_compare_op),
@@ -282,6 +307,183 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         .front = stencil_op_state,
         .back = stencil_op_state,
     };
+}
+
+} // Anonymous namespace
+
+PipelineLibraries::PipelineLibraries(const Instance& instance_, RenderManager& renderpass_cache_,
+                                     vk::PipelineLayout layout_)
+    : instance{instance_}, renderpass_cache{renderpass_cache_}, pipeline_layout{layout_} {}
+
+PipelineLibraries::~PipelineLibraries() = default;
+
+template <typename Func>
+vk::Pipeline PipelineLibraries::Get(u64 key, bool only_ready, Func&& build) {
+    Library* library;
+    {
+        std::scoped_lock lock{mutex};
+        auto& slot = libraries[key];
+        if (!slot) {
+            slot = std::make_unique<Library>();
+        }
+        library = slot.get();
+    }
+
+    std::unique_lock lock{library->mutex, std::defer_lock};
+    if (!only_ready) {
+        lock.lock();
+    } else if (!lock.try_lock()) {
+        // A worker is compiling it
+        return vk::Pipeline{};
+    }
+    if (!library->handle) {
+        if (only_ready) {
+            return vk::Pipeline{};
+        }
+        library->handle = build();
+    }
+    return *library->handle;
+}
+
+vk::UniquePipeline PipelineLibraries::Create(vk::GraphicsPipelineLibraryFlagsEXT part,
+                                             vk::GraphicsPipelineCreateInfo create_info,
+                                             vk::PipelineCache pipeline_cache) {
+    const vk::GraphicsPipelineLibraryCreateInfoEXT library_info = {
+        .flags = part,
+    };
+    create_info.pNext = &library_info;
+    create_info.flags |= vk::PipelineCreateFlagBits::eLibraryKHR;
+
+    auto result = instance.GetDevice().createGraphicsPipelineUnique(pipeline_cache, create_info);
+    if (result.result != vk::Result::eSuccess) {
+        UNREACHABLE_MSG("Pipeline library creation failed!");
+    }
+    return std::move(result.value);
+}
+
+vk::UniquePipeline PipelineLibraries::Link(const PipelineInfo& info,
+                                           const std::array<Shader*, 3>& stages,
+                                           vk::PipelineCache pipeline_cache, bool only_ready) {
+    using Part = vk::GraphicsPipelineLibraryFlagBitsEXT;
+    using Pica::Shader::Generator::ProgramType;
+
+    const PipelineState state{instance, info};
+    const auto& ids = info.state.shader_ids;
+    const u64 attachments = Common::ComputeStructHash64(info.state.attachments);
+    const vk::RenderPass renderpass =
+        renderpass_cache.GetRenderpass(info.state.attachments.color, info.state.attachments.depth,
+                                       false, info.state.attachments.sample_count);
+    const auto key = [](Part part, auto... fields) {
+        return Common::HashCombine(static_cast<u64>(part), static_cast<u64>(fields)...);
+    };
+    const auto stage_info = [&](ProgramType type) {
+        Shader* shader = stages[static_cast<u32>(type)];
+        shader->WaitDone();
+        return vk::PipelineShaderStageCreateInfo{
+            .stage = MakeShaderStage(static_cast<std::size_t>(type)),
+            .module = shader->Handle(),
+            .pName = "main",
+        };
+    };
+
+    // The vertex shader is the part that takes long, the only one a draw is spared
+    const vk::Pipeline pre_rasterization =
+        Get(key(Part::ePreRasterizationShaders, ids[static_cast<u32>(ProgramType::VS)],
+                ids[static_cast<u32>(ProgramType::GS)], attachments),
+            only_ready, [&] {
+                boost::container::static_vector<vk::PipelineShaderStageCreateInfo, 2> shaders;
+                shaders.push_back(stage_info(ProgramType::VS));
+                if (stages[static_cast<u32>(ProgramType::GS)]) {
+                    shaders.push_back(stage_info(ProgramType::GS));
+                }
+                return Create(Part::ePreRasterizationShaders,
+                              {
+                                  .stageCount = static_cast<u32>(shaders.size()),
+                                  .pStages = shaders.data(),
+                                  .pViewportState = &state.viewport_info,
+                                  .pRasterizationState = &state.raster_state,
+                                  .pDynamicState = &state.dynamic_info,
+                                  .layout = pipeline_layout,
+                                  .renderPass = renderpass,
+                              },
+                              pipeline_cache);
+            });
+    if (!pre_rasterization) {
+        return {};
+    }
+
+    const vk::Pipeline fragment =
+        Get(key(Part::eFragmentShader, ids[static_cast<u32>(ProgramType::FS)], attachments), false,
+            [&] {
+                const auto shader = stage_info(ProgramType::FS);
+                return Create(Part::eFragmentShader,
+                              {
+                                  .stageCount = 1,
+                                  .pStages = &shader,
+                                  .pMultisampleState = &state.multisampling,
+                                  .pDepthStencilState = &state.depth_info,
+                                  .pDynamicState = &state.dynamic_info,
+                                  .layout = pipeline_layout,
+                                  .renderPass = renderpass,
+                              },
+                              pipeline_cache);
+            });
+
+    const vk::Pipeline vertex_input =
+        Get(key(Part::eVertexInputInterface, Common::ComputeStructHash64(info.state.vertex_layout)),
+            false, [&] {
+                return Create(Part::eVertexInputInterface,
+                              {
+                                  .pVertexInputState = &state.vertex_input_info,
+                                  .pInputAssemblyState = &state.input_assembly,
+                                  .pDynamicState = &state.dynamic_info,
+                              },
+                              pipeline_cache);
+            });
+
+    const vk::Pipeline output =
+        Get(key(Part::eFragmentOutputInterface, Common::ComputeStructHash64(info.state.blending),
+                attachments),
+            false, [&] {
+                return Create(Part::eFragmentOutputInterface,
+                              {
+                                  .pMultisampleState = &state.multisampling,
+                                  .pColorBlendState = &state.color_blending,
+                                  .pDynamicState = &state.dynamic_info,
+                                  .renderPass = renderpass,
+                              },
+                              pipeline_cache);
+            });
+
+    const std::array parts = {vertex_input, pre_rasterization, fragment, output};
+    const vk::PipelineLibraryCreateInfoKHR library_info = {
+        .libraryCount = static_cast<u32>(parts.size()),
+        .pLibraries = parts.data(),
+    };
+    const vk::GraphicsPipelineCreateInfo link_info = {
+        .pNext = &library_info,
+        .layout = pipeline_layout,
+    };
+    auto result = instance.GetDevice().createGraphicsPipelineUnique(pipeline_cache, link_info);
+    if (result.result != vk::Result::eSuccess) {
+        UNREACHABLE_MSG("Linking the pipeline failed!");
+    }
+    return std::move(result.value);
+}
+
+bool GraphicsPipeline::Build(bool fail_on_compile_required) {
+    MICROPROFILE_SCOPE(Vulkan_Pipeline);
+
+    if (libraries) {
+        pipeline = libraries->Link(info, stages, pipeline_cache, fail_on_compile_required);
+        if (!pipeline) {
+            return false;
+        }
+        MarkDone();
+        return true;
+    }
+
+    const PipelineState state{instance, info};
 
     u32 shader_count = 0;
     std::array<vk::PipelineShaderStageCreateInfo, MAX_SHADER_STAGES> shader_stages;
@@ -302,14 +504,14 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
     vk::GraphicsPipelineCreateInfo pipeline_info = {
         .stageCount = shader_count,
         .pStages = shader_stages.data(),
-        .pVertexInputState = &vertex_input_info,
-        .pInputAssemblyState = &input_assembly,
-        .pViewportState = &viewport_info,
-        .pRasterizationState = &raster_state,
-        .pMultisampleState = &multisampling,
-        .pDepthStencilState = &depth_info,
-        .pColorBlendState = &color_blending,
-        .pDynamicState = &dynamic_info,
+        .pVertexInputState = &state.vertex_input_info,
+        .pInputAssemblyState = &state.input_assembly,
+        .pViewportState = &state.viewport_info,
+        .pRasterizationState = &state.raster_state,
+        .pMultisampleState = &state.multisampling,
+        .pDepthStencilState = &state.depth_info,
+        .pColorBlendState = &state.color_blending,
+        .pDynamicState = &state.dynamic_info,
         .layout = pipeline_layout,
         .renderPass = renderpass_cache.GetRenderpass(info.state.attachments.color,
                                                      info.state.attachments.depth, false,
