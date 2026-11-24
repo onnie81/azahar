@@ -698,6 +698,17 @@
         <item>9</item>
     </integer-array>
 
+    <string-array name="asyncShadersNames">
+        <item>@string/off</item>
+        <item>@string/async_shaders_skip_draws</item>
+        <item>@string/async_shaders_interpreter</item>
+    </string-array>
+    <integer-array name="asyncShadersValues">
+        <item>0</item>
+        <item>1</item>
+        <item>2</item>
+    </integer-array>
+
     <string-array name="updateCheckChannels">
         <item>@string/update_check_channel_stable</item>
         <item>@string/update_check_channel_prerelease</item>
