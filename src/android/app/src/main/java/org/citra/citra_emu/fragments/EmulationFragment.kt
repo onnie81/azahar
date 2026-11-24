@@ -1515,6 +1515,11 @@ class EmulationFragment :
                                 (perfStats[timeRem] * 1000.0f).toFloat()
                             )
                         )
+                        val driverInfo = NativeLibrary.getDriverInfo()
+                        if (driverInfo.isNotEmpty()) {
+                            sb.append(dividerString)
+                            sb.append("Driver:\u00A0$driverInfo")
+                        }
                     }
 
                     if (activeSettings.get(BooleanSetting.PERF_OVERLAY_SHOW_SPEED)) {

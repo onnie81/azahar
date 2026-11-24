@@ -68,6 +68,10 @@ public:
 
     bool DiskResourcesLoadCrashed(u64 title_id) override;
 
+    const PipelineCache& GetPipelineCache() const {
+        return pipeline_cache;
+    }
+
 private:
     /// Syncs pipeline state from PICA registers
     void SyncDrawState();

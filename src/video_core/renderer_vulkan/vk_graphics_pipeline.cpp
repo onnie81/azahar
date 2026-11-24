@@ -358,6 +358,11 @@ vk::UniquePipeline PipelineLibraries::Create(vk::GraphicsPipelineLibraryFlagsEXT
     if (result.result != vk::Result::eSuccess) {
         UNREACHABLE_MSG("Pipeline library creation failed!");
     }
+    if (part & vk::GraphicsPipelineLibraryFlagBitsEXT::ePreRasterizationShaders) {
+        vertex_parts++;
+    } else if (part & vk::GraphicsPipelineLibraryFlagBitsEXT::eFragmentShader) {
+        fragment_parts++;
+    }
     return std::move(result.value);
 }
 
