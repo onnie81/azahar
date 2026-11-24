@@ -263,7 +263,7 @@ GraphicsPipeline* ShaderDiskCache::GetPipeline(const PipelineInfo& info) {
             parent.instance, parent.renderpass_cache, info,
             interpreted ? *parent.interpreter_pipeline_cache : *parent.driver_pipeline_cache,
             *parent.pipeline_layout, parent.current_shaders, &parent.pipeline_workers,
-            &parent.waited_pipeline_workers);
+            &parent.waited_pipeline_workers, parent.pipeline_libraries.get());
     }
 
     if (!interpreted && !vertex_interpreted && known_graphic_pipelines.emplace(hash).second) {
@@ -1476,7 +1476,7 @@ bool ShaderDiskCache::InitPLCache(const std::atomic_bool& stop_loading,
             it_pl.value() = std::make_unique<GraphicsPipeline>(
                 parent.instance, parent.renderpass_cache, info, *parent.driver_pipeline_cache,
                 *parent.pipeline_layout, shaders, &parent.pipeline_workers,
-                &parent.waited_pipeline_workers);
+                &parent.waited_pipeline_workers, parent.pipeline_libraries.get());
 
             // The cached shaders are compiled above, so a pipeline that is not built yet was queued
             if (!it_pl.value()->TryBuild(false)) {
