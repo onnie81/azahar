@@ -15,6 +15,6 @@ using RegGetter = std::function<std::string(u32)>;
 std::string DecompileProgram(const Pica::ProgramCode& program_code,
                              const Pica::SwizzleData& swizzle_data, u32 main_offset,
                              const RegGetter& inputreg_getter, const RegGetter& outputreg_getter,
-                             bool sanitize_mul);
+                             bool sanitize_mul, u32 folded_bools = 0);
 
 } // namespace Pica::Shader::Generator::GLSL
