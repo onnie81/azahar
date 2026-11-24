@@ -2,6 +2,8 @@
 // Licensed under GPLv2 or any later version
 // Refer to the misc/licenses/gplv2.txt file included.
 
+#include <unordered_map>
+#include <nihstro/shader_bytecode.h>
 #include "common/bit_set.h"
 #include "common/logging/log.h"
 #include "common/settings.h"
@@ -42,6 +44,33 @@ std::array<PicaGSConfigState::SemanticMap, 24> PicaGSConfigState::GetSemanticMap
     }
 
     return semantic_maps;
+}
+
+u32 FoldBoolUniforms(Pica::ShaderSetup& setup) {
+    // Bool uniforms tested anywhere in the program, by program hash
+    thread_local std::unordered_map<u64, u32> tested_bools;
+    const auto [it, is_new] = tested_bools.try_emplace(setup.GetProgramCodeHash(), 0u);
+    if (is_new) {
+        const auto& code = setup.GetProgramCode();
+        for (u32 offset = 0; offset < setup.GetBiggestProgramSize(); offset++) {
+            const nihstro::Instruction instr = {code[offset]};
+            switch (instr.opcode.Value().EffectiveOpCode()) {
+            case nihstro::OpCode::Id::CALLU:
+            case nihstro::OpCode::Id::IFU:
+            case nihstro::OpCode::Id::JMPU:
+                it->second |= 1u << instr.flow_control.bool_uniform_id;
+                break;
+            default:
+                break;
+            }
+        }
+    }
+
+    u32 values = 0;
+    for (u32 i = 0; i < setup.uniforms.b.size(); i++) {
+        values |= static_cast<u32>(setup.uniforms.b[i]) << i;
+    }
+    return FOLDED_BOOLS | (values & it->second);
 }
 
 void PicaVSConfigState::Init(const Pica::RegsInternal& regs, Pica::ShaderSetup& setup) {
