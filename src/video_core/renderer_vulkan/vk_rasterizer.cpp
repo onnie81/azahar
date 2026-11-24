@@ -82,7 +82,8 @@ RasterizerVulkan::RasterizerVulkan(Memory::MemorySystem& memory, Pica::PicaCore&
       texture_lf_buffer{instance, scheduler, vk::BufferUsageFlagBits::eUniformTexelBuffer,
                         TextureBufferSize(instance)},
       async_shaders{Settings::values.async_shader_compilation.GetValue()},
-      interpreter_handoff{Settings::values.async_shader_interpreter.GetValue()} {
+      interpreter_handoff{Settings::values.async_shader_interpreter.GetValue()},
+      interpret_fragments{Settings::values.async_fragment_interpreter.GetValue()} {
 
     vertex_buffers.fill(stream_buffer.Handle());
 
@@ -529,8 +530,14 @@ void RasterizerVulkan::UseVertexInterpreter() {
 }
 
 void RasterizerVulkan::HandOffToInterpreter(bool accelerate) {
-    if (pipeline_cache.IsPipelineReady(pipeline_info) || pipeline_cache.InterpretersFailed() ||
-        !UseFragmentInterpreter()) {
+    // Batches the CPU processed only have a fragment shader to replace
+    if (!accelerate && !interpret_fragments) {
+        return;
+    }
+    if (pipeline_cache.IsPipelineReady(pipeline_info) || pipeline_cache.InterpretersFailed()) {
+        return;
+    }
+    if (interpret_fragments && !UseFragmentInterpreter()) {
         return;
     }
     if (accelerate) {
