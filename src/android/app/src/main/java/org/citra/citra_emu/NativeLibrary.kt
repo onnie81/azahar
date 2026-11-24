@@ -214,6 +214,11 @@ object NativeLibrary {
     external fun getPerfStats(): DoubleArray
 
     /**
+     * Returns the graphics driver of the current game and what the renderer builds with it
+     */
+    external fun getDriverInfo(): String
+
+    /**
      * Notifies the core emulation that the layout should be updated
      */
     external fun updateFramebuffer(isPortrait: Boolean)

@@ -1494,6 +1494,15 @@ bool RendererVulkan::TryRenderScreenshotWithHostMemory() {
     return true;
 }
 
+std::string RendererVulkan::GetDriverInfo() {
+    std::string info =
+        fmt::format("{} {}", instance.GetVendorName(), instance.GetDriverVersionName());
+    if (const auto parts = rasterizer.GetPipelineCache().GetLibraryParts()) {
+        info += fmt::format(" (Lib: {} VS {} FS)", parts->first, parts->second);
+    }
+    return info;
+}
+
 void RendererVulkan::NotifySurfaceChanged(bool is_second_window) {
     if (is_second_window) {
         if (secondary_present_window_ptr) {

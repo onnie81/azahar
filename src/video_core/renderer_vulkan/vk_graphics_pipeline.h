@@ -344,6 +344,11 @@ public:
     vk::UniquePipeline Link(const PipelineInfo& info, const std::array<Shader*, 3>& stages,
                             vk::PipelineCache pipeline_cache, bool only_ready);
 
+    /// The vertex and the fragment shader parts compiled so far
+    std::pair<u32, u32> ShaderParts() const {
+        return {vertex_parts.load(), fragment_parts.load()};
+    }
+
 private:
     struct Library {
         std::mutex mutex;
@@ -364,6 +369,8 @@ private:
     vk::PipelineLayout pipeline_layout;
     std::mutex mutex;
     std::unordered_map<u64, std::unique_ptr<Library>> libraries;
+    std::atomic<u32> vertex_parts{0};
+    std::atomic<u32> fragment_parts{0};
 };
 
 class GraphicsPipeline : public Common::AsyncHandle {
