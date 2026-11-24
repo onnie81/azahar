@@ -155,6 +155,7 @@ private:
     u32 uniform_size_aligned_fs;
     bool async_shaders{false};
     bool interpreter_handoff{false};
+    bool interpret_fragments{false};
     /// Offsets of the decoded vertex programs in the uniform buffer, by program hash
     std::unordered_map<u64, u32> interpreter_programs;
 };

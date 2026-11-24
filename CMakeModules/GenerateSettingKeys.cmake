@@ -42,6 +42,7 @@ foreach(KEY IN ITEMS
     "disable_spirv_optimizer"
     "async_shader_compilation"
     "async_shader_interpreter"
+    "async_fragment_interpreter"
     "async_presentation"
     "use_hw_shader"
     "use_disk_shader_cache"
