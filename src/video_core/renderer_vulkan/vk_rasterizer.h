@@ -143,6 +143,9 @@ private:
     u32 uniform_size_aligned_vs;
     u32 uniform_size_aligned_fs;
     bool async_shaders{false};
+    /// The color attachment of the open pass while a draw that has none goes into it
+    vk::ImageView kept_color_view{};
+    bool kept_color_sampled{false};
 };
 
 } // namespace Vulkan
