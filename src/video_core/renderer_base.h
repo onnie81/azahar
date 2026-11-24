@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <string>
 #include "common/common_types.h"
 #include "core/frontend/framebuffer_layout.h"
 #include "video_core/rasterizer_interface.h"
@@ -63,6 +64,11 @@ public:
     /// This is called to notify the rendering backend of a surface change
     // if second == true then it is the second screen
     virtual void NotifySurfaceChanged(bool second) {}
+
+    /// The graphics driver and what the renderer builds with it, for a frontend to display
+    virtual std::string GetDriverInfo() {
+        return {};
+    }
 
     /// Returns the resolution scale factor relative to the native 3DS screen resolution
     u32 GetResolutionScaleFactor();
