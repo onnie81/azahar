@@ -569,6 +569,7 @@ struct Values {
     SwitchableSetting<bool> disable_spirv_optimizer{true, Keys::disable_spirv_optimizer};
     SwitchableSetting<bool> async_shader_compilation{false, Keys::async_shader_compilation};
     SwitchableSetting<bool> async_shader_interpreter{false, Keys::async_shader_interpreter};
+    SwitchableSetting<bool> async_fragment_interpreter{false, Keys::async_fragment_interpreter};
     SwitchableSetting<bool> async_presentation{true, Keys::async_presentation};
     SwitchableSetting<bool> use_hw_shader{true, Keys::use_hw_shader};
     SwitchableSetting<bool> use_disk_shader_cache{true, Keys::use_disk_shader_cache};
