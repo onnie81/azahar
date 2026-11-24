@@ -667,6 +667,13 @@ void PipelineCache::UseFragmentInterpreter(u32 variant) {
     shader_hashes[ProgramType::FS] = FRAGMENT_INTERPRETER_ID + variant;
 }
 
+std::optional<std::pair<u32, u32>> PipelineCache::GetLibraryParts() const {
+    if (!pipeline_libraries) {
+        return std::nullopt;
+    }
+    return pipeline_libraries->ShaderParts();
+}
+
 bool PipelineCache::InterpretersFailed() {
     const auto failed = [](const std::unique_ptr<Shader>& shader) {
         return shader && shader->IsDone() && !shader->Handle();
