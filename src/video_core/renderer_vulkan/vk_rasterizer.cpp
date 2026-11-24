@@ -39,6 +39,10 @@ using namespace Pica::Shader::Generator;
 
 constexpr u64 STREAM_BUFFER_SIZE = 64_MiB;
 constexpr u64 UNIFORM_BUFFER_SIZE = 8_MiB;
+constexpr u64 PROGRAM_BUFFER_SIZE = 4_MiB;
+// One slot less than fits, for the alignment between them
+constexpr std::size_t MAX_INTERPRETER_PROGRAMS =
+    PROGRAM_BUFFER_SIZE / sizeof(Pica::Shader::Generator::VSInterpreterProgram) - 1;
 constexpr u64 TEXTURE_BUFFER_SIZE = 2_MiB;
 
 // eStorageBuffer: the vertex interpreter reads the vertex data through an SSBO
@@ -77,6 +81,8 @@ RasterizerVulkan::RasterizerVulkan(Memory::MemorySystem& memory, Pica::PicaCore&
       stream_buffer{instance, scheduler, BUFFER_USAGE, STREAM_BUFFER_SIZE},
       uniform_buffer{instance, scheduler, vk::BufferUsageFlagBits::eUniformBuffer,
                      UNIFORM_BUFFER_SIZE},
+      program_buffer{instance, scheduler, vk::BufferUsageFlagBits::eUniformBuffer,
+                     PROGRAM_BUFFER_SIZE},
       texture_buffer{instance, scheduler, vk::BufferUsageFlagBits::eUniformTexelBuffer,
                      TextureBufferSize(instance)},
       texture_lf_buffer{instance, scheduler, vk::BufferUsageFlagBits::eUniformTexelBuffer,
@@ -128,7 +134,7 @@ RasterizerVulkan::RasterizerVulkan(Memory::MemorySystem& memory, Pica::PicaCore&
     update_queue.AddTexelBuffer(buffer_set, 3, *texture_lf_view);
     update_queue.AddTexelBuffer(buffer_set, 4, *texture_rg_view);
     update_queue.AddTexelBuffer(buffer_set, 5, *texture_rgba_view);
-    update_queue.AddBuffer(buffer_set, 6, uniform_buffer.Handle(), 0,
+    update_queue.AddBuffer(buffer_set, 6, program_buffer.Handle(), 0,
                            sizeof(Pica::Shader::Generator::VSInterpreterProgram));
     update_queue.AddBuffer(buffer_set, 7, stream_buffer.Handle(), 0, VK_WHOLE_SIZE,
                            vk::DescriptorType::eStorageBuffer);
@@ -478,7 +484,7 @@ bool RasterizerVulkan::UseFragmentInterpreter() {
     return true;
 }
 
-void RasterizerVulkan::UseVertexInterpreter() {
+bool RasterizerVulkan::UseVertexInterpreter() {
     namespace Generator = Pica::Shader::Generator;
     auto& setup = pica.vs_setup;
 
@@ -486,19 +492,17 @@ void RasterizerVulkan::UseVertexInterpreter() {
         Common::HashCombine(setup.GetProgramCodeHash(), setup.GetSwizzleDataHash());
     auto it = interpreter_programs.find(program_hash);
     if (it == interpreter_programs.end()) {
+        // Programs stay where they are, draws of any earlier frame can still be reading them
+        if (interpreter_programs.size() >= MAX_INTERPRETER_PROGRAMS) {
+            return false;
+        }
         Generator::VSInterpreterProgram program;
         Generator::GLSL::DecodeVertexProgram(setup.GetProgramCode(), setup.GetSwizzleData(),
                                              program);
-        const auto [data, offset, invalidate] =
-            uniform_buffer.Map(sizeof(program), uniform_buffer_alignment);
+        const auto [data, offset, _] =
+            program_buffer.Map(sizeof(program), uniform_buffer_alignment);
         std::memcpy(data, &program, sizeof(program));
-        uniform_buffer.Commit(sizeof(program));
-        if (invalidate) {
-            interpreter_programs.clear();
-            vs_data_dirty = true;
-            fs_data_dirty = true;
-            setup.uniforms_dirty = true;
-        }
+        program_buffer.Commit(sizeof(program));
         it = interpreter_programs.emplace(program_hash, offset).first;
     }
     pipeline_cache.UpdateRange(3, it->second);
@@ -527,6 +531,7 @@ void RasterizerVulkan::UseVertexInterpreter() {
     // No vertex input state, the shader pulls the vertices itself
     layout = {};
     pipeline_cache.UseVertexInterpreter();
+    return true;
 }
 
 void RasterizerVulkan::HandOffToInterpreter(bool accelerate) {
@@ -1153,10 +1158,6 @@ void RasterizerVulkan::UploadUniforms(bool accelerate_draw) {
         uniform_buffer.Map(uniform_size, uniform_buffer_alignment);
 
     u32 used_bytes = 0;
-
-    if (invalidate) {
-        interpreter_programs.clear();
-    }
 
     if (vs_data_dirty || invalidate) {
         std::memcpy(uniforms + used_bytes, &vs_data, sizeof(vs_data));
