@@ -240,6 +240,10 @@ GraphicsPipeline* ShaderDiskCache::GetPipeline(const PipelineInfo& info) {
     u64 hash = info.Hash();
     u64 optimized_hash = info.state.OptimizedHash(parent.instance);
 
+    // Interpreter pipelines don't go in the disk cache
+    const bool interpreted =
+        info.state.shader_ids[Pica::Shader::Generator::ProgramType::VS] - VERTEX_INTERPRETER_ID < 2;
+
     auto [it, new_pipeline] = graphics_pipelines.try_emplace(optimized_hash);
     if (new_pipeline) {
         if (!parent.instance.UseGeometryShaders() ||
@@ -252,10 +256,11 @@ GraphicsPipeline* ShaderDiskCache::GetPipeline(const PipelineInfo& info) {
         }
         it.value() = std::make_unique<GraphicsPipeline>(
             parent.instance, parent.renderpass_cache, info, *parent.driver_pipeline_cache,
-            *parent.pipeline_layout, parent.current_shaders, &parent.pipeline_workers);
+            *parent.pipeline_layout, parent.current_shaders, &parent.pipeline_workers,
+            &parent.waited_pipeline_workers);
     }
 
-    if (known_graphic_pipelines.emplace(hash).second) {
+    if (!interpreted && known_graphic_pipelines.emplace(hash).second) {
         LOG_NEW_OBJECT(Render_Vulkan, "New Pipeline {:016X}", hash);
 
         PLConfigEntry entry{
@@ -1464,7 +1469,8 @@ bool ShaderDiskCache::InitPLCache(const std::atomic_bool& stop_loading,
             auto [it_pl, _] = graphics_pipelines.try_emplace(pl_hash_opt);
             it_pl.value() = std::make_unique<GraphicsPipeline>(
                 parent.instance, parent.renderpass_cache, info, *parent.driver_pipeline_cache,
-                *parent.pipeline_layout, shaders, &parent.pipeline_workers);
+                *parent.pipeline_layout, shaders, &parent.pipeline_workers,
+                &parent.waited_pipeline_workers);
 
             // The cached shaders are compiled above, so a pipeline that is not built yet was queued
             if (!it_pl.value()->TryBuild(false)) {

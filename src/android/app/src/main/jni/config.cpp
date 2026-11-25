@@ -200,7 +200,11 @@ void Config::ReadValues() {
     ReadSetting("Renderer", Settings::values.shaders_accurate_mul);
     ReadSetting("Renderer", Settings::values.graphics_api);
     ReadSetting("Renderer", Settings::values.async_presentation);
-    ReadSetting("Renderer", Settings::values.async_shader_compilation);
+    // 0: off, 1: skip draws, 2: vertex interpreter
+    const std::string async_shaders =
+        GetSettingFromKey<std::string>("Renderer", Settings::Keys::async_shader_compilation, "0");
+    Settings::values.async_shader_compilation = async_shaders == "1" || async_shaders == "true";
+    Settings::values.async_shader_interpreter = async_shaders == "2";
     ReadSetting("Renderer", Settings::values.spirv_shader_gen);
     ReadSetting("Renderer", Settings::values.disable_spirv_optimizer);
     ReadSetting("Renderer", Settings::values.use_hw_shader);

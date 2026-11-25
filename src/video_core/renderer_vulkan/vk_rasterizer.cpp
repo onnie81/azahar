@@ -2,6 +2,7 @@
 // Licensed under GPLv3 or any later version
 // Refer to the LICENSE.txt file included.
 
+#include <cstring>
 #include "common/alignment.h"
 #include "common/literals.h"
 #include "common/logging/log.h"
@@ -17,6 +18,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/shader/generator/glsl_shader_gen.h"
 #include "video_core/texture/texture_decode.h"
 
 namespace Vulkan {
@@ -35,10 +37,16 @@ using namespace Pica::Shader::Generator;
 
 constexpr u64 STREAM_BUFFER_SIZE = 64_MiB;
 constexpr u64 UNIFORM_BUFFER_SIZE = 8_MiB;
+constexpr u64 PROGRAM_BUFFER_SIZE = 4_MiB;
+// One slot less than fits, for the alignment between them
+constexpr std::size_t MAX_INTERPRETER_PROGRAMS =
+    PROGRAM_BUFFER_SIZE / sizeof(Pica::Shader::Generator::VSInterpreterProgram) - 1;
 constexpr u64 TEXTURE_BUFFER_SIZE = 2_MiB;
 
-constexpr vk::BufferUsageFlags BUFFER_USAGE =
-    vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eIndexBuffer;
+// eStorageBuffer: the vertex interpreter reads the vertex data through an SSBO
+constexpr vk::BufferUsageFlags BUFFER_USAGE = vk::BufferUsageFlagBits::eVertexBuffer |
+                                              vk::BufferUsageFlagBits::eIndexBuffer |
+                                              vk::BufferUsageFlagBits::eStorageBuffer;
 
 struct DrawParams {
     u32 vertex_count;
@@ -71,11 +79,14 @@ RasterizerVulkan::RasterizerVulkan(Memory::MemorySystem& memory, Pica::PicaCore&
       stream_buffer{instance, scheduler, BUFFER_USAGE, STREAM_BUFFER_SIZE},
       uniform_buffer{instance, scheduler, vk::BufferUsageFlagBits::eUniformBuffer,
                      UNIFORM_BUFFER_SIZE},
+      program_buffer{instance, scheduler, vk::BufferUsageFlagBits::eUniformBuffer,
+                     PROGRAM_BUFFER_SIZE},
       texture_buffer{instance, scheduler, vk::BufferUsageFlagBits::eUniformTexelBuffer,
                      TextureBufferSize(instance)},
       texture_lf_buffer{instance, scheduler, vk::BufferUsageFlagBits::eUniformTexelBuffer,
                         TextureBufferSize(instance)},
-      async_shaders{Settings::values.async_shader_compilation.GetValue()} {
+      async_shaders{Settings::values.async_shader_compilation.GetValue()},
+      interpreter_handoff{Settings::values.async_shader_interpreter.GetValue()} {
 
     vertex_buffers.fill(stream_buffer.Handle());
 
@@ -120,6 +131,10 @@ RasterizerVulkan::RasterizerVulkan(Memory::MemorySystem& memory, Pica::PicaCore&
     update_queue.AddTexelBuffer(buffer_set, 3, *texture_lf_view);
     update_queue.AddTexelBuffer(buffer_set, 4, *texture_rg_view);
     update_queue.AddTexelBuffer(buffer_set, 5, *texture_rgba_view);
+    update_queue.AddBuffer(buffer_set, 6, program_buffer.Handle(), 0,
+                           sizeof(Pica::Shader::Generator::VSInterpreterProgram));
+    update_queue.AddBuffer(buffer_set, 7, stream_buffer.Handle(), 0, VK_WHOLE_SIZE,
+                           vk::DescriptorType::eStorageBuffer);
 
     const auto texture_set = pipeline_cache.Acquire(DescriptorHeapType::Texture);
     Surface& null_surface = res_cache.GetSurface(VideoCore::NULL_SURFACE_ID);
@@ -446,6 +461,63 @@ bool RasterizerVulkan::SetupGeometryShader() {
     return pipeline_cache.UseFixedGeometryShader(regs);
 }
 
+bool RasterizerVulkan::UseVertexInterpreter() {
+    namespace Generator = Pica::Shader::Generator;
+    auto& setup = pica.vs_setup;
+
+    const u64 program_hash =
+        Common::HashCombine(setup.GetProgramCodeHash(), setup.GetSwizzleDataHash());
+    auto it = interpreter_programs.find(program_hash);
+    if (it == interpreter_programs.end()) {
+        // Programs stay where they are, draws of any earlier frame can still be reading them
+        if (interpreter_programs.size() >= MAX_INTERPRETER_PROGRAMS) {
+            return false;
+        }
+        Generator::VSInterpreterProgram program;
+        Generator::GLSL::DecodeVertexProgram(setup.GetProgramCode(), setup.GetSwizzleData(),
+                                             program);
+        const auto [data, offset, _] =
+            program_buffer.Map(sizeof(program), uniform_buffer_alignment);
+        std::memcpy(data, &program, sizeof(program));
+        program_buffer.Commit(sizeof(program));
+        it = interpreter_programs.emplace(program_hash, offset).first;
+    }
+    pipeline_cache.UpdateRange(3, it->second);
+
+    Generator::GLSL::PackVertexInterpreterConfig(Generator::PicaVSConfig{regs, setup}, vs_data);
+    VertexLayout& layout = pipeline_info.state.vertex_layout;
+    const u32 stride_alignment = instance.GetMinVertexStrideAlignment();
+    u32 loaded = 0;
+    for (u32 reg = 0; reg < 16; reg++) {
+        const VertexAttribute& attribute = layout.attributes[reg];
+        const VertexBinding& binding = layout.bindings[attribute.binding];
+        // Offset 0 of the fixed binding is the default attribute, registers start out with it
+        if (binding.fixed && attribute.offset == 0) {
+            continue;
+        }
+        const u32 stride =
+            binding.fixed ? 0 : Common::AlignUp<u32>(binding.byte_count, stride_alignment);
+        vs_data.interp_attributes[reg] = {binding_offsets[attribute.binding] + attribute.offset,
+                                          stride, static_cast<u32>(attribute.type.Value()),
+                                          attribute.size};
+        loaded |= 1u << reg;
+    }
+    vs_data.interp_config.y = loaded;
+    vs_data_dirty = true;
+
+    // No vertex input state, the shader pulls the vertices itself
+    layout = {};
+    pipeline_cache.UseVertexInterpreter();
+    return true;
+}
+
+void RasterizerVulkan::HandOffToInterpreter() {
+    if (pipeline_cache.IsPipelineReady(pipeline_info) || pipeline_cache.InterpretersFailed()) {
+        return;
+    }
+    UseVertexInterpreter();
+}
+
 bool RasterizerVulkan::AccelerateDrawBatch(bool is_indexed) {
     if (regs.pipeline.use_gs != Pica::PipelineRegs::UseGS::No) {
         if (regs.pipeline.gs_config.mode != Pica::PipelineRegs::GSMode::Point) {
@@ -505,7 +577,10 @@ bool RasterizerVulkan::AccelerateDrawBatchInternal(bool is_indexed) {
         std::array<vk::DeviceSize, 16> offsets;
         std::transform(params.bindings.begin(), params.bindings.end(), offsets.begin(),
                        [](u32 offset) { return static_cast<vk::DeviceSize>(offset); });
-        cmdbuf.bindVertexBuffers(0, params.binding_count, vertex_buffers.data(), offsets.data());
+        if (params.binding_count != 0) {
+            cmdbuf.bindVertexBuffers(0, params.binding_count, vertex_buffers.data(),
+                                     offsets.data());
+        }
         if (params.is_indexed) {
             cmdbuf.drawIndexed(params.vertex_count, 1, 0, params.vertex_offset, 0);
         } else {
@@ -578,11 +653,13 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
     const auto fb_helper = res_cache.GetFramebufferSurfaces(using_color_fb, using_depth_fb);
     const Framebuffer* framebuffer = fb_helper.Framebuffer();
     if (!framebuffer->Handle()) {
+        vertex_batch.clear();
         return true;
     }
 
     const auto draw_rect = fb_helper.DrawRect();
     if (draw_rect.GetArea() == 0) {
+        vertex_batch.clear();
         return true;
     }
 
@@ -608,6 +685,10 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
 
     // Sync and bind the shader
     pipeline_cache.UseFragmentShader(regs, user_config);
+    // Batches the CPU processed have no vertex shader to replace
+    if (interpreter_handoff && accelerate) {
+        HandOffToInterpreter();
+    }
 
     // Sync the LUTs within the texture buffer
     SyncAndUploadLUTs();

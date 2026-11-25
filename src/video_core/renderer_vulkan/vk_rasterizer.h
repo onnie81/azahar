@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <unordered_map>
+
 #include "video_core/rasterizer_accelerated.h"
 #include "video_core/renderer_vulkan/vk_descriptor_update_queue.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
@@ -112,6 +114,12 @@ private:
     /// Setup geometry shader for AccelerateDrawBatch
     bool SetupGeometryShader();
 
+    /// Binds the vertex interpreter and uploads its program and attribute layout
+    bool UseVertexInterpreter();
+
+    /// Switches the draw to the vertex interpreter if its pipeline isn't built yet
+    void HandOffToInterpreter();
+
     /// Creates the vertex layout struct used for software shader pipelines
     void MakeSoftwareVertexLayout();
 
@@ -133,6 +141,7 @@ private:
 
     StreamBuffer stream_buffer;     ///< Vertex+Index buffer
     StreamBuffer uniform_buffer;    ///< Uniform buffer
+    StreamBuffer program_buffer;    ///< Decoded programs of the vertex interpreter
     StreamBuffer texture_buffer;    ///< Texture buffer
     StreamBuffer texture_lf_buffer; ///< Texture Light-Fog buffer
     vk::UniqueBufferView texture_lf_view;
@@ -143,6 +152,9 @@ private:
     u32 uniform_size_aligned_vs;
     u32 uniform_size_aligned_fs;
     bool async_shaders{false};
+    bool interpreter_handoff{false};
+    /// Offsets of the decoded vertex programs in their buffer, by program hash
+    std::unordered_map<u64, u32> interpreter_programs;
 };
 
 } // namespace Vulkan

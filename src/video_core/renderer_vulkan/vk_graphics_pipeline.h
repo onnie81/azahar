@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <atomic>
 #include "common/hash.h"
 #include "common/thread_worker.h"
 #include "video_core/pica/regs_pipeline.h"
@@ -300,6 +301,9 @@ struct PipelineInfo : Common::HashableStruct<StaticPipelineInfo> {
     [[nodiscard]] u16 GetFinalColorWriteMask(const Instance& instance);
 };
 
+/// Shader id of the vertex interpreter in the pipeline key, plus one with accurate multiplication
+constexpr u64 VERTEX_INTERPRETER_ID = 0x7265746E495356ULL;
+
 struct Shader : public Common::AsyncHandle {
     explicit Shader(const Instance& instance);
     explicit Shader(const Instance& instance, vk::ShaderStageFlagBits stage, std::string code);
@@ -319,12 +323,15 @@ public:
     explicit GraphicsPipeline(const Instance& instance, RenderManager& renderpass_cache,
                               const PipelineInfo& info, vk::PipelineCache pipeline_cache,
                               vk::PipelineLayout layout, std::array<Shader*, 3> stages,
-                              Common::ThreadWorker* worker);
+                              Common::ThreadWorker* worker, Common::ThreadWorker* waited_worker);
     ~GraphicsPipeline();
 
     bool TryBuild(bool wait_built);
 
     bool Build(bool fail_on_compile_required = false);
+
+    /// Builds the pipeline unless another worker already started on it
+    void BuildOnce();
 
     [[nodiscard]] vk::Pipeline Handle() const noexcept {
         return *pipeline;
@@ -334,6 +341,7 @@ private:
     const Instance& instance;
     RenderManager& renderpass_cache;
     Common::ThreadWorker* worker;
+    Common::ThreadWorker* waited_worker;
 
     vk::UniquePipeline pipeline;
     vk::PipelineLayout pipeline_layout;
@@ -342,6 +350,8 @@ private:
     PipelineInfo info;
     std::array<Shader*, 3> stages;
     bool is_pending{};
+    bool is_waited{};
+    std::atomic_flag build_taken;
 };
 
 } // namespace Vulkan

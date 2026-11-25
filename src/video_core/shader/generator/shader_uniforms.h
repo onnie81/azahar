@@ -82,16 +82,29 @@ struct VSUniformData {
     };
     u32 freecam_skip_2d{1};
 #endif
+    // Vertex interpreter only
+    // x: entry point, y: mask of input registers to load
+    alignas(16) Common::Vec4u interp_config;
+    // register * 4 + component for each output semantic
+    alignas(16) Common::Vec4u interp_semantic_map[6];
+    // address of vertex 0, stride, format, component count
+    alignas(16) Common::Vec4u interp_attributes[16];
 };
 #ifdef ENABLE_FREECAM
-static_assert(sizeof(VSUniformData) == 112,
+static_assert(sizeof(VSUniformData) == 480,
               "The size of the VSUniformData does not match the structure in the shader");
 #else
-static_assert(sizeof(VSUniformData) == 32,
+static_assert(sizeof(VSUniformData) == 400,
               "The size of the VSUniformData does not match the structure in the shader");
 #endif
 static_assert(sizeof(VSUniformData) < 16384,
               "VSUniformData structure must be less than 16kb as per the OpenGL spec");
+
+/// Decoded vertex program for the vertex interpreter, two words per instruction
+struct VSInterpreterProgram {
+    std::array<u32, 2 * 4096> code;
+};
+static_assert(sizeof(VSInterpreterProgram) == 32768);
 
 /**
  * Uniform struct for the Uniform Buffer Object that contains PICA vertex/geometry shader uniforms.

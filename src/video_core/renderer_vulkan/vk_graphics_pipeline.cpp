@@ -75,9 +75,11 @@ Shader::~Shader() {
 GraphicsPipeline::GraphicsPipeline(const Instance& instance_, RenderManager& renderpass_cache_,
                                    const PipelineInfo& info_, vk::PipelineCache pipeline_cache_,
                                    vk::PipelineLayout layout_, std::array<Shader*, 3> stages_,
-                                   Common::ThreadWorker* worker_)
+                                   Common::ThreadWorker* worker_,
+                                   Common::ThreadWorker* waited_worker_)
     : instance{instance_}, renderpass_cache{renderpass_cache_}, worker{worker_},
-      pipeline_layout{layout_}, pipeline_cache{pipeline_cache_}, info{info_}, stages{stages_} {}
+      waited_worker{waited_worker_}, pipeline_layout{layout_}, pipeline_cache{pipeline_cache_},
+      info{info_}, stages{stages_} {}
 
 GraphicsPipeline::~GraphicsPipeline() = default;
 
@@ -85,6 +87,11 @@ bool GraphicsPipeline::TryBuild(bool wait_built) {
     // The pipeline is currently being compiled. We can either wait for it
     // or skip the draw.
     if (is_pending) {
+        if (wait_built && !is_waited) {
+            // Might still be sitting in the background queue
+            waited_worker->QueueWork([this] { BuildOnce(); });
+            is_waited = true;
+        }
         return wait_built;
     }
 
@@ -101,9 +108,16 @@ bool GraphicsPipeline::TryBuild(bool wait_built) {
     }
 
     // Fallback to (a)synchronous compilation
-    worker->QueueWork([this] { Build(); });
+    (wait_built ? waited_worker : worker)->QueueWork([this] { BuildOnce(); });
     is_pending = true;
+    is_waited = wait_built;
     return wait_built;
+}
+
+void GraphicsPipeline::BuildOnce() {
+    if (!build_taken.test_and_set()) {
+        Build();
+    }
 }
 
 bool GraphicsPipeline::Build(bool fail_on_compile_required) {
