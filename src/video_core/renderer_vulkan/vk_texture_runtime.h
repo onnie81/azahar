@@ -5,6 +5,7 @@
 #pragma once
 
 #include <span>
+#include <vector>
 #include "video_core/rasterizer_cache/framebuffer_base.h"
 #include "video_core/rasterizer_cache/rasterizer_cache_base.h"
 #include "video_core/rasterizer_cache/surface_base.h"
@@ -288,6 +289,9 @@ private:
     void DepthStencilDownload(const VideoCore::BufferTextureCopy& download,
                               const VideoCore::StagingData& staging);
 
+    /// Gives the images the format of the storage view, with what they hold
+    void MakeStorage();
+
 public:
     TextureRuntime& runtime;
     const Instance& instance;
@@ -300,6 +304,10 @@ public:
     vk::UniqueImageView storage_view;
     bool is_framebuffer{};
     bool is_storage{};
+    /// Whether the images can have the storage view
+    bool storage_format{};
+    /// The images that MakeStorage replaced, kept for the commands that still use them
+    std::vector<Handle> retired;
 };
 
 class Framebuffer : public VideoCore::FramebufferParams {
