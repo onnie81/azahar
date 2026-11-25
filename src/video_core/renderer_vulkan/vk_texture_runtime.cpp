@@ -777,7 +777,8 @@ Surface::Surface(TextureRuntime& runtime_, const VideoCore::SurfaceParams& param
 
     // The storage view is of another format. A surface that is not known to be a shadow source
     // takes it when it is first asked for that view
-    bool is_mutable = True(flags & VideoCore::SurfaceFlagBits::ShadowSource);
+    bool is_mutable = True(flags & VideoCore::SurfaceFlagBits::ShadowSource) ||
+                      runtime.storage_surfaces.contains(StorageKey());
 
     if (True(flags & VideoCore::SurfaceFlagBits::ShadowSource) &&
         traits.native != vk::Format::eR8G8B8A8Unorm) {
@@ -1410,6 +1411,7 @@ void Surface::MakeStorage() {
         retired.push_back(std::move(old));
     }
     storage_format = true;
+    runtime.storage_surfaces.insert(StorageKey());
 }
 
 vk::ImageView Surface::ImageView(ViewType view_type, Type type) noexcept {
