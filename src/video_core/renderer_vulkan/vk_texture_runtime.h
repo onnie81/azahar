@@ -5,6 +5,7 @@
 #pragma once
 
 #include <span>
+#include <unordered_set>
 #include <vector>
 #include "video_core/rasterizer_cache/framebuffer_base.h"
 #include "video_core/rasterizer_cache/rasterizer_cache_base.h"
@@ -173,6 +174,8 @@ private:
     void ClearTextureWithRenderpass(Surface& surface, const VideoCore::TextureClear& clear);
 
 private:
+    /// The surfaces that took the storage format: one made again there has it from the start
+    std::unordered_set<u64> storage_surfaces;
     const Instance& instance;
     Scheduler& scheduler;
     RenderManager& renderpass_cache;
@@ -285,6 +288,11 @@ private:
 
     /// Gives the images the format of the storage view, with what they hold
     void MakeStorage();
+
+    /// What the runtime knows a surface that took the storage format by
+    u64 StorageKey() const noexcept {
+        return (static_cast<u64>(addr) << 32) | (static_cast<u64>(width) << 16) | height;
+    }
 
 public:
     TextureRuntime& runtime;
