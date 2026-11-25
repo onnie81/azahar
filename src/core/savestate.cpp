@@ -299,12 +299,20 @@ bool System::LoadStateBuffer(std::vector<u8> buffer) {
         LOG_ERROR(Core, "Save state isn't for the current game");
         return false;
     }
-    std::string revision = fmt::format("{:02x}", fmt::join(header.revision, ""));
+    // Like loading from a slot: another commit of the same build loads, another build does not
+    const std::string revision = fmt::format("{:02x}", fmt::join(header.revision, ""));
     if (revision != Common::g_scm_rev) {
-        LOG_ERROR(Core,
-                  "Save state file created from a different revision (core: {}, savestate: {})",
-                  Common::g_scm_rev, revision);
-        return false;
+        const std::string build_version =
+            header.zero_2 == 0 ? reinterpret_cast<const char*>(header.build_version.data()) : "";
+        if (build_version != Common::g_build_version) {
+            LOG_ERROR(Core,
+                      "Save state file created by a different build (core: {}, savestate: {})",
+                      Common::g_build_version, build_version);
+            return false;
+        }
+        LOG_WARNING(Core,
+                    "Save state file created from a different revision (core: {}, savestate: {})",
+                    Common::g_scm_rev, revision);
     }
 
     std::vector<u8> state(buffer.begin() + sizeof(CSTHeader), buffer.end());
