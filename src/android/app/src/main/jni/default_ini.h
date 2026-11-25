@@ -13,7 +13,8 @@ namespace DefaultINI {
 // documenting (people can contribute documentation if they care), or some other explained reason
 constexpr std::array android_config_omitted_keys = {
     Settings::Keys::enable_gamemode,
-    Settings::Keys::async_shader_interpreter, // Stored in async_shader_compilation
+    Settings::Keys::async_shader_interpreter,   // Stored in async_shader_compilation
+    Settings::Keys::async_fragment_interpreter, // Stored in async_shader_compilation
     Settings::Keys::use_custom_storage,
     Settings::Keys::init_time_offset,
     Settings::Keys::physical_device,
@@ -140,6 +141,7 @@ static const char* android_config_default_file_content = (BOOST_HANA_STRING(R"(
 
 # Whether to compile shaders on multiple worker threads (Vulkan only)
 # 0: Off (default), 1: On, skip draws while compiling, 2: On, draw with the vertex interpreter while compiling
+# 3: Same as 2, with the fragment interpreter as well (slow on mobile GPUs)
 )") DECLARE_KEY(async_shader_compilation) BOOST_HANA_STRING(R"(
 
 # Whether to emit PICA fragment shader using SPIRV or GLSL (Vulkan only)

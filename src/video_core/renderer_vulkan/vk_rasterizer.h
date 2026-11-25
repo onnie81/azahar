@@ -114,11 +114,14 @@ private:
     /// Setup geometry shader for AccelerateDrawBatch
     bool SetupGeometryShader();
 
+    /// Binds the fragment interpreter if it supports the current state
+    bool UseFragmentInterpreter();
+
     /// Binds the vertex interpreter and uploads its program and attribute layout
     bool UseVertexInterpreter();
 
-    /// Switches the draw to the vertex interpreter if its pipeline isn't built yet
-    void HandOffToInterpreter();
+    /// Switches the draw to the interpreters if its pipeline isn't built yet
+    void HandOffToInterpreter(bool accelerate);
 
     /// Creates the vertex layout struct used for software shader pipelines
     void MakeSoftwareVertexLayout();
@@ -153,6 +156,7 @@ private:
     u32 uniform_size_aligned_fs;
     bool async_shaders{false};
     bool interpreter_handoff{false};
+    bool interpret_fragments{false};
     /// Offsets of the decoded vertex programs in their buffer, by program hash
     std::unordered_map<u64, u32> interpreter_programs;
 };

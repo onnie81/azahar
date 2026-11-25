@@ -301,8 +301,14 @@ struct PipelineInfo : Common::HashableStruct<StaticPipelineInfo> {
     [[nodiscard]] u16 GetFinalColorWriteMask(const Instance& instance);
 };
 
-/// Shader id of the vertex interpreter in the pipeline key, plus one with accurate multiplication
+/// Shader ids of the interpreter shaders in the pipeline key
+constexpr u64 FRAGMENT_INTERPRETER_ID = 0x7265746E495346ULL;
+constexpr u64 NUM_FRAGMENT_INTERPRETERS = 4;
 constexpr u64 VERTEX_INTERPRETER_ID = 0x7265746E495356ULL;
+
+constexpr bool IsFragmentInterpreter(u64 shader_id) {
+    return shader_id - FRAGMENT_INTERPRETER_ID < NUM_FRAGMENT_INTERPRETERS;
+}
 
 struct Shader : public Common::AsyncHandle {
     explicit Shader(const Instance& instance);

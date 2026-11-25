@@ -242,6 +242,8 @@ GraphicsPipeline* ShaderDiskCache::GetPipeline(const PipelineInfo& info) {
 
     // Interpreter pipelines don't go in the disk cache
     const bool interpreted =
+        IsFragmentInterpreter(info.state.shader_ids[Pica::Shader::Generator::ProgramType::FS]);
+    const bool vertex_interpreted =
         info.state.shader_ids[Pica::Shader::Generator::ProgramType::VS] - VERTEX_INTERPRETER_ID < 2;
 
     auto [it, new_pipeline] = graphics_pipelines.try_emplace(optimized_hash);
@@ -255,12 +257,13 @@ GraphicsPipeline* ShaderDiskCache::GetPipeline(const PipelineInfo& info) {
             parent.UseTrivialGeometryShader();
         }
         it.value() = std::make_unique<GraphicsPipeline>(
-            parent.instance, parent.renderpass_cache, info, *parent.driver_pipeline_cache,
+            parent.instance, parent.renderpass_cache, info,
+            interpreted ? *parent.interpreter_pipeline_cache : *parent.driver_pipeline_cache,
             *parent.pipeline_layout, parent.current_shaders, &parent.pipeline_workers,
             &parent.waited_pipeline_workers);
     }
 
-    if (!interpreted && known_graphic_pipelines.emplace(hash).second) {
+    if (!interpreted && !vertex_interpreted && known_graphic_pipelines.emplace(hash).second) {
         LOG_NEW_OBJECT(Render_Vulkan, "New Pipeline {:016X}", hash);
 
         PLConfigEntry entry{

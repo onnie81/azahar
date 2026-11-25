@@ -135,6 +135,17 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
 
     BuildLayout();
 
+    const bool interpret_fragments = Settings::values.async_fragment_interpreter.GetValue();
+    for (u32 i = 0; interpret_fragments && i < fragment_interpreters.size(); i++) {
+        fragment_interpreters[i] = std::make_unique<Shader>(instance);
+        shader_workers.QueueWork([this, i] {
+            Shader& shader = *fragment_interpreters[i];
+            shader.module = Compile(GLSL::GenerateFragmentInterpreter(
+                                        profile, static_cast<GLSL::InterpreterVariant>(i)),
+                                    vk::ShaderStageFlagBits::eFragment, instance.GetDevice());
+            shader.MarkDone();
+        });
+    }
     for (u32 i = 0; i < vertex_interpreters.size(); i++) {
         vertex_interpreters[i] = std::make_unique<Shader>(instance);
         shader_workers.QueueWork([this, i] {
@@ -145,6 +156,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
             shader.MarkDone();
         });
     }
+    LoadInterpreterPipelineCache();
 }
 
 void PipelineCache::BuildLayout() {
@@ -167,6 +179,7 @@ PipelineCache::~PipelineCache() {
     waited_pipeline_workers.WaitForRequests();
     shader_workers.WaitForRequests();
     SaveDriverPipelineDiskCache();
+    SaveInterpreterPipelineCache();
 }
 
 void PipelineCache::LoadCache(const std::atomic_bool& stop_loading,
@@ -206,6 +219,7 @@ void PipelineCache::SwitchCache(u64 title_id, const std::atomic_bool& stop_loadi
     // Save current driver cache, if one was loaded, update program ID and load the new driver cache
     if (curr_disk_cache) {
         SaveDriverPipelineDiskCache();
+        SaveInterpreterPipelineCache();
     }
     SetProgramID(title_id);
     LoadDriverPipelineDiskCache(stop_loading, nullptr);
@@ -642,10 +656,59 @@ void PipelineCache::UseFragmentShader(const Pica::RegsInternal& regs,
     }
 }
 
+void PipelineCache::UseFragmentInterpreter(u32 variant) {
+    current_shaders[ProgramType::FS] = fragment_interpreters[variant].get();
+    shader_hashes[ProgramType::FS] = FRAGMENT_INTERPRETER_ID + variant;
+}
+
 bool PipelineCache::InterpretersFailed() {
-    return std::ranges::any_of(vertex_interpreters, [](const std::unique_ptr<Shader>& shader) {
-        return shader->IsDone() && !shader->Handle();
-    });
+    const auto failed = [](const std::unique_ptr<Shader>& shader) {
+        return shader && shader->IsDone() && !shader->Handle();
+    };
+    return std::ranges::any_of(fragment_interpreters, failed) ||
+           std::ranges::any_of(vertex_interpreters, failed);
+}
+
+std::string PipelineCache::GetInterpreterPipelineCachePath() const {
+    return fmt::format("{}interpreters-{:X}{:X}.bin", GetPipelineCacheDir(), instance.GetVendorID(),
+                       instance.GetDeviceID());
+}
+
+void PipelineCache::LoadInterpreterPipelineCache() {
+    std::vector<u8> data;
+    if (Settings::values.use_disk_shader_cache && EnsureDirectories()) {
+        FileUtil::IOFile file{GetInterpreterPipelineCachePath(), "rb"};
+        if (file.IsOpen()) {
+            data.resize(file.GetSize());
+            if (file.ReadBytes(data.data(), data.size()) != data.size() || !IsCacheValid(data)) {
+                data.clear();
+            }
+        }
+    }
+
+    const vk::Device device = instance.GetDevice();
+    vk::PipelineCacheCreateInfo cache_info{
+        .initialDataSize = data.size(),
+        .pInitialData = data.data(),
+    };
+    try {
+        interpreter_pipeline_cache = device.createPipelineCacheUnique(cache_info);
+    } catch (const vk::SystemError& err) {
+        LOG_ERROR(Render_Vulkan, "Failed to create the interpreter pipeline cache: {}", err.what());
+        interpreter_pipeline_cache = device.createPipelineCacheUnique({});
+    }
+}
+
+void PipelineCache::SaveInterpreterPipelineCache() {
+    if (!Settings::values.use_disk_shader_cache || !interpreter_pipeline_cache ||
+        !EnsureDirectories()) {
+        return;
+    }
+    const auto data = instance.GetDevice().getPipelineCacheData(*interpreter_pipeline_cache);
+    FileUtil::IOFile file{GetInterpreterPipelineCachePath(), "wb"};
+    if (!file.IsOpen() || file.WriteBytes(data.data(), data.size()) != data.size()) {
+        LOG_ERROR(Render_Vulkan, "Error during interpreter pipeline cache write");
+    }
 }
 
 void PipelineCache::UseVertexInterpreter() {

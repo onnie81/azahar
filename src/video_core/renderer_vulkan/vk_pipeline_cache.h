@@ -92,14 +92,21 @@ public:
     /// Binds a fragment shader generated from PICA state
     void UseFragmentShader(const Pica::RegsInternal& regs, const Pica::Shader::UserConfig& user);
 
+    /// Binds a fragment interpreter shader
+    void UseFragmentInterpreter(u32 variant);
+
     /// Binds the vertex interpreter shader
     void UseVertexInterpreter();
 
-    /// Returns true if a vertex interpreter shader failed to compile
+    /// Returns true if an interpreter shader failed to compile
     bool InterpretersFailed();
 
     /// Returns true if the pipeline for the bound shaders is built, queues it otherwise
     bool IsPipelineReady(PipelineInfo& info);
+
+    const Pica::Shader::Profile& GetProfile() const noexcept {
+        return profile;
+    }
 
     /// Queries which channels need min/max blend emulation in the fragment shader
     void QueryBlendEmulation(const Pica::RegsInternal& regs, bool& rgb_emulation,
@@ -154,6 +161,12 @@ private:
     /// Create pipeline cache directories. Returns true on success.
     bool EnsureDirectories() const;
 
+    void LoadInterpreterPipelineCache();
+
+    void SaveInterpreterPipelineCache();
+
+    std::string GetInterpreterPipelineCachePath() const;
+
     /// Returns the Vulkan shader directory
     std::string GetVulkanDir() const;
 
@@ -171,6 +184,8 @@ private:
 
     Pica::Shader::Profile profile{};
     vk::UniquePipelineCache driver_pipeline_cache;
+    /// Driver cache of the interpreter pipelines, shared by all titles
+    vk::UniquePipelineCache interpreter_pipeline_cache;
     vk::UniquePipelineLayout pipeline_layout;
     std::size_t num_worker_threads;
     Common::ThreadWorker pipeline_workers;
@@ -187,6 +202,7 @@ private:
     std::array<Shader*, MAX_SHADER_STAGES> current_shaders;
 
     Shader trivial_vertex_shader;
+    std::array<std::unique_ptr<Shader>, NUM_FRAGMENT_INTERPRETERS> fragment_interpreters;
     /// Index 1 is built with accurate multiplication
     std::array<std::unique_ptr<Shader>, 2> vertex_interpreters;
 

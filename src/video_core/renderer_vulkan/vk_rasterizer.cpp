@@ -2,6 +2,7 @@
 // Licensed under GPLv3 or any later version
 // Refer to the LICENSE.txt file included.
 
+#include <cstddef>
 #include <cstring>
 #include "common/alignment.h"
 #include "common/literals.h"
@@ -18,6 +19,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/shader/generator/glsl_fs_shader_gen.h"
 #include "video_core/shader/generator/glsl_shader_gen.h"
 #include "video_core/texture/texture_decode.h"
 
@@ -86,7 +88,8 @@ RasterizerVulkan::RasterizerVulkan(Memory::MemorySystem& memory, Pica::PicaCore&
       texture_lf_buffer{instance, scheduler, vk::BufferUsageFlagBits::eUniformTexelBuffer,
                         TextureBufferSize(instance)},
       async_shaders{Settings::values.async_shader_compilation.GetValue()},
-      interpreter_handoff{Settings::values.async_shader_interpreter.GetValue()} {
+      interpreter_handoff{Settings::values.async_shader_interpreter.GetValue()},
+      interpret_fragments{Settings::values.async_fragment_interpreter.GetValue()} {
 
     vertex_buffers.fill(stream_buffer.Handle());
 
@@ -461,6 +464,26 @@ bool RasterizerVulkan::SetupGeometryShader() {
     return pipeline_cache.UseFixedGeometryShader(regs);
 }
 
+bool RasterizerVulkan::UseFragmentInterpreter() {
+    namespace GLSL = Pica::Shader::Generator::GLSL;
+    const Pica::Shader::FSConfig config{regs};
+    const auto& profile = pipeline_cache.GetProfile();
+    const auto variant = GLSL::FragmentInterpreterVariant(config, user_config, profile);
+    if (!variant) {
+        return false;
+    }
+
+    constexpr std::size_t offset = offsetof(FSUniformData, interp_tev);
+    std::array<u8, sizeof(FSUniformData) - offset> previous;
+    const u8* const packed = reinterpret_cast<const u8*>(&fs_data) + offset;
+    std::memcpy(previous.data(), packed, previous.size());
+    GLSL::PackFragmentInterpreterConfig(config, profile, fs_data);
+    fs_data_dirty |= std::memcmp(previous.data(), packed, previous.size()) != 0;
+
+    pipeline_cache.UseFragmentInterpreter(static_cast<u32>(*variant));
+    return true;
+}
+
 bool RasterizerVulkan::UseVertexInterpreter() {
     namespace Generator = Pica::Shader::Generator;
     auto& setup = pica.vs_setup;
@@ -511,11 +534,20 @@ bool RasterizerVulkan::UseVertexInterpreter() {
     return true;
 }
 
-void RasterizerVulkan::HandOffToInterpreter() {
+void RasterizerVulkan::HandOffToInterpreter(bool accelerate) {
+    // Batches the CPU processed only have a fragment shader to replace
+    if (!accelerate && !interpret_fragments) {
+        return;
+    }
     if (pipeline_cache.IsPipelineReady(pipeline_info) || pipeline_cache.InterpretersFailed()) {
         return;
     }
-    UseVertexInterpreter();
+    if (interpret_fragments && !UseFragmentInterpreter()) {
+        return;
+    }
+    if (accelerate) {
+        UseVertexInterpreter();
+    }
 }
 
 bool RasterizerVulkan::AccelerateDrawBatch(bool is_indexed) {
@@ -685,9 +717,8 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
 
     // Sync and bind the shader
     pipeline_cache.UseFragmentShader(regs, user_config);
-    // Batches the CPU processed have no vertex shader to replace
-    if (interpreter_handoff && accelerate) {
-        HandOffToInterpreter();
+    if (interpreter_handoff) {
+        HandOffToInterpreter(accelerate);
     }
 
     // Sync the LUTs within the texture buffer
