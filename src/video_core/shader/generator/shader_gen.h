@@ -158,6 +158,7 @@ struct ExtraVSConfig {
     u8 use_geometry_shader;
     u8 sanitize_mul;
     u8 separable_shader;
+    u8 invariant_position;
 
     // Load operations to apply to the input vertex data
     std::array<AttribLoadFlags, 16> load_flags;

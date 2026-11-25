@@ -570,6 +570,8 @@ ExtraVSConfig PipelineCache::CalcExtraConfig(const PicaVSConfig& config) {
     res.use_geometry_shader = use_geometry_shader;
     res.sanitize_mul = profile.enable_accurate_mul;
     res.separable_shader = true;
+    // A model can go through the interpreter in one pass and its own shader in the next
+    res.invariant_position = Settings::values.async_shader_interpreter.GetValue();
     res.load_flags.fill(AttribLoadFlags::Float);
 
     for (u32 i = 0; i < config.state.used_input_vertex_attributes; i++) {
