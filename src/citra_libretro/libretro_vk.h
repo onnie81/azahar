@@ -149,7 +149,7 @@ private:
 private:
     Frontend::EmuWindow& emu_window;
     const Instance& instance;
-    [[maybe_unused]] Scheduler& scheduler;
+    Scheduler& scheduler;
 
     // LibRetro output texture (replaces swapchain)
     vk::Image output_image{};
