@@ -206,6 +206,7 @@ bool RenderManager::BeginRendering(const Framebuffer* framebuffer,
                 ClearNow(taken[i], part);
             }
         }
+        MakeAttachment(taken[i]);
         // Depth is the second attachment when there is a color one
         new_pass.clears[i == 1 && attachments[0] ? 1 : 0] = taken[i].value;
     }
@@ -277,6 +278,8 @@ void RenderManager::Clear(Surface& surface, const VideoCore::TextureClear& clear
         pending.view = view;
         pending.image = surface.Image();
         pending.aspect = surface.Aspect();
+        pending.access = surface.AccessFlags();
+        pending.stages = surface.PipelineStageFlags();
         pending.framebuffer = surface.Framebuffer();
         pending.render_pass = GetRenderpass(is_color ? format : PixelFormat::Invalid,
                                             is_color ? PixelFormat::Invalid : format, true, 1);
@@ -297,7 +300,38 @@ void RenderManager::FlushClear(PendingClear& pending) {
     }
 }
 
+void RenderManager::MakeAttachment(const PendingClear& clear) {
+    scheduler.Record([image = clear.image, aspect = clear.aspect, access = clear.access,
+                      stages = clear.stages](vk::CommandBuffer cmdbuf) {
+        const bool is_color = static_cast<bool>(aspect & vk::ImageAspectFlagBits::eColor);
+        const vk::ImageMemoryBarrier barrier = {
+            .srcAccessMask = access,
+            .dstAccessMask = is_color ? vk::AccessFlagBits::eColorAttachmentRead |
+                                            vk::AccessFlagBits::eColorAttachmentWrite
+                                      : vk::AccessFlagBits::eDepthStencilAttachmentRead |
+                                            vk::AccessFlagBits::eDepthStencilAttachmentWrite,
+            .oldLayout = vk::ImageLayout::eGeneral,
+            .newLayout = vk::ImageLayout::eGeneral,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = image,
+            .subresourceRange{
+                .aspectMask = aspect,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = VK_REMAINING_ARRAY_LAYERS,
+            },
+        };
+        cmdbuf.pipelineBarrier(stages,
+                               is_color ? vk::PipelineStageFlagBits::eColorAttachmentOutput
+                                        : vk::PipelineStageFlagBits::eEarlyFragmentTests,
+                               vk::DependencyFlagBits::eByRegion, {}, {}, barrier);
+    });
+}
+
 void RenderManager::ClearNow(const PendingClear& clear, const vk::Rect2D& area) {
+    MakeAttachment(clear);
     // A pass that draws nothing
     BeginPass(RenderPass{
         .framebuffer = clear.framebuffer,
