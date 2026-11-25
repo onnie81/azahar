@@ -74,6 +74,9 @@ private:
     void SyncAndUploadLUTs();
     void SyncAndUploadLUTsLF();
 
+    /// Makes the framebuffer again when its color surface has taken other images
+    void RenewFramebuffer(Framebuffer* framebuffer);
+
     /// Syncs all enabled PICA texture units
     void SyncTextureUnits(const Framebuffer* framebuffer);
 
