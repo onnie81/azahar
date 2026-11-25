@@ -704,6 +704,10 @@ void PresentWindow::Present(Frame* frame) {
     persistent_libretro_image.create_info =
         static_cast<VkImageViewCreateInfo>(output_view_create_info);
 
+    // The frontend copies the image as soon as it has it, so the frame's drawing must be on the
+    // queue by then; the worker may not have submitted it yet.
+    scheduler.WaitWorker();
+
     vulkan_intf->set_image(vulkan_intf->handle, &persistent_libretro_image, 0, nullptr,
                            instance.GetGraphicsQueueFamilyIndex());
 
