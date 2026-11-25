@@ -87,6 +87,8 @@ private:
         vk::ImageView view;
         vk::Image image;
         vk::ImageAspectFlags aspect;
+        vk::AccessFlags access;
+        vk::PipelineStageFlags stages;
         vk::Framebuffer framebuffer;
         vk::RenderPass render_pass;
         vk::Rect2D whole;
@@ -103,6 +105,9 @@ private:
 
     /// Clears the area in a pass of its own
     void ClearNow(const PendingClear& clear, const vk::Rect2D& area);
+
+    /// Has the image be an attachment after what was done to it before
+    void MakeAttachment(const PendingClear& clear);
 
     /// Returns the renderpass that clears the attachments asked for and loads the others
     vk::RenderPass GetRenderpass(VideoCore::PixelFormat color, VideoCore::PixelFormat depth,
