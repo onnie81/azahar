@@ -6,6 +6,7 @@
 
 #include <bit>
 #include <mutex>
+#include <boost/container/static_vector.hpp>
 
 #include "common/math_util.h"
 #include "video_core/rasterizer_cache/pixel_format.h"
@@ -13,13 +14,15 @@
 
 namespace VideoCore {
 enum class PixelFormat : u32;
-}
+struct TextureClear;
+} // namespace VideoCore
 
 namespace Vulkan {
 
 class Instance;
 class Scheduler;
 class Framebuffer;
+class Surface;
 
 struct RenderPass {
     vk::Framebuffer framebuffer;
@@ -47,11 +50,16 @@ public:
     ~RenderManager();
 
     /// Renders to the framebuffer, in the pass that is open if it has those attachments and
-    /// in a new one otherwise. Returns whether the pass went on with an attachment more
-    bool BeginRendering(const Framebuffer* framebuffer);
+    /// takes in the draw, and in a new one otherwise. Returns whether the pass went on with an
+    /// attachment more
+    bool BeginRendering(const Framebuffer* framebuffer, Common::Rectangle<u32> draw_rect);
 
-    /// Whether the pass that is open has the attachments of the framebuffer
-    bool Covers(const Framebuffer* framebuffer) const;
+    /// Whether the pass that is open has the attachments of the framebuffer and takes in the draw
+    bool Covers(const Framebuffer* framebuffer, Common::Rectangle<u32> draw_rect) const;
+
+    /// Clears a rectangle of the first level of a surface. The clear waits to be the load of the
+    /// pass that renders there, and is a pass of its own when something else comes first
+    void Clear(Surface& surface, const VideoCore::TextureClear& clear);
 
     /// The attachments of the pass that is open
     VideoCore::PixelFormat ColorFormat() const noexcept {
@@ -75,9 +83,40 @@ public:
                                  bool is_clear, u8 sample_count = 1);
 
 private:
+    struct PendingClear {
+        vk::ImageView view;
+        vk::Image image;
+        vk::ImageAspectFlags aspect;
+        vk::AccessFlags access;
+        vk::PipelineStageFlags stages;
+        vk::Framebuffer framebuffer;
+        vk::RenderPass render_pass;
+        vk::Rect2D whole;
+        vk::ClearValue value{};
+        boost::container::static_vector<vk::Rect2D, 8> areas;
+    };
+
+    /// Begin and end a pass and leave the clears waiting
+    void BeginPass(const RenderPass& new_pass);
+    void EndPass();
+
+    /// Clears what waited in passes of their own
+    void FlushClear(PendingClear& pending);
+
+    /// Clears the area in a pass of its own
+    void ClearNow(const PendingClear& clear, const vk::Rect2D& area);
+
+    /// Has the image be an attachment after what was done to it before
+    void MakeAttachment(const PendingClear& clear);
+
+    /// Returns the renderpass that clears the attachments asked for and loads the others
+    vk::RenderPass GetRenderpass(VideoCore::PixelFormat color, VideoCore::PixelFormat depth,
+                                 bool clear_color, bool clear_depth, u8 sample_count);
+
     /// Creates a renderpass configured appropriately and stores it in cached_renderpasses
     vk::UniqueRenderPass CreateRenderPass(vk::Format color, vk::Format depth,
-                                          vk::AttachmentLoadOp load_op) const;
+                                          vk::AttachmentLoadOp color_load_op,
+                                          vk::AttachmentLoadOp depth_load_op) const;
 
     /// Creates an MSAA renderpass configured appropriately and stores it in cached_renderpasses
     vk::UniqueRenderPass CreateRenderPassMSAA(vk::Format color, vk::Format depth,
@@ -88,7 +127,7 @@ private:
     const Instance& instance;
     Scheduler& scheduler;
     vk::UniqueRenderPass cached_renderpasses[NumColorFormats + 1][NumDepthFormats + 1]
-                                            [std::bit_width(MaxSamples)][2];
+                                            [std::bit_width(MaxSamples)][4];
     std::mutex cache_mutex;
     std::array<vk::Image, 4> images;
     std::array<vk::ImageAspectFlags, 4> aspects;
@@ -97,6 +136,8 @@ private:
     std::array<VideoCore::PixelFormat, 2> formats{VideoCore::PixelFormat::Invalid,
                                                   VideoCore::PixelFormat::Invalid};
     u8 samples{1};
+    /// Color and depth. None waits while a pass is open
+    std::array<PendingClear, 2> pending_clears{};
     RenderPass pass{};
     u32 num_draws{};
 };
