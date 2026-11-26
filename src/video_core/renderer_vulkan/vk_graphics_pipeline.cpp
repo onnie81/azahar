@@ -189,8 +189,15 @@ bool GraphicsPipeline::Build(bool fail_on_compile_required) {
         alpha_op = vk::BlendOp::eAdd;
     }
 
+    // The PICA always blends or applies a logic operation. With these factors the result is
+    // the source, and a driver takes blending as a read of the target
+    const bool copies_source =
+        src_color_factor == vk::BlendFactor::eOne && dst_color_factor == vk::BlendFactor::eZero &&
+        color_op == vk::BlendOp::eAdd && src_alpha_factor == vk::BlendFactor::eOne &&
+        dst_alpha_factor == vk::BlendFactor::eZero && alpha_op == vk::BlendOp::eAdd;
+
     const vk::PipelineColorBlendAttachmentState colorblend_attachment = {
-        .blendEnable = blending.blend_enable,
+        .blendEnable = blending.blend_enable && !copies_source,
         .srcColorBlendFactor = src_color_factor,
         .dstColorBlendFactor = dst_color_factor,
         .colorBlendOp = color_op,
