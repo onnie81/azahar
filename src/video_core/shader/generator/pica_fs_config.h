@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <optional>
+#include <utility>
 #include "common/hash.h"
 #include "video_core/pica/regs_internal.h"
 #include "video_core/shader/generator/profile.h"
@@ -73,6 +75,8 @@ struct FramebufferConfig {
         BitField<6, 4, Pica::FramebufferRegs::LogicOp> logic_op;
         BitField<10, 1, u32> shadow_rendering;
         BitField<11, 1, u32> alphablend_enable;
+        // The rasterizer outputs the depth and the shader does not write it
+        BitField<12, 1, u32> rasterizer_depth;
     };
     BlendConfig requested_rgb_blend{};
     BlendConfig requested_alpha_blend{};
@@ -94,8 +98,8 @@ struct FramebufferConfig {
             // fields
             FIELD_HASH(alpha_test_func), FIELD_HASH(scissor_test_mode), FIELD_HASH(depthmap_enable),
             FIELD_HASH(logic_op), FIELD_HASH(shadow_rendering), FIELD_HASH(alphablend_enable),
-            FIELD_HASH(requested_rgb_blend), FIELD_HASH(requested_alpha_blend),
-            FIELD_HASH(requested_logic_op),
+            FIELD_HASH(rasterizer_depth), FIELD_HASH(requested_rgb_blend),
+            FIELD_HASH(requested_alpha_blend), FIELD_HASH(requested_logic_op),
 
             // nested layout
             BlendConfig::StructHash());
@@ -392,6 +396,9 @@ union UserConfig {
     }
 };
 static_assert(std::has_unique_object_representations_v<UserConfig>);
+
+/// The viewport depth range that has the rasterizer output the depth of the PICA, if there is one
+std::optional<std::pair<f32, f32>> ViewportDepthRange(const Pica::RegsInternal& regs);
 
 struct FSConfig {
     explicit FSConfig(const Pica::RegsInternal& regs);

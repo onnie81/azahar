@@ -3,6 +3,7 @@
 // Refer to the LICENSE.txt file included.
 
 #include "video_core/shader/generator/pica_fs_config.h"
+#include "video_core/pica_types.h"
 
 namespace Pica::Shader {
 
@@ -213,6 +214,23 @@ ProcTexConfig::ProcTexConfig(const Pica::TexturingRegs& regs) {
     lod_min = regs.proctex_lut.lod_min;
     lod_max = regs.proctex_lut.lod_max;
     lut_filter.Assign(regs.proctex_lut.filter);
+}
+
+std::optional<std::pair<f32, f32>> ViewportDepthRange(const Pica::RegsInternal& regs) {
+    if (regs.rasterizer.depthmap_enable != Pica::RasterizerRegs::DepthBuffering::ZBuffering ||
+        regs.framebuffer.IsShadowRendering()) {
+        return std::nullopt;
+    }
+    const f32 scale = f24::FromRaw(regs.rasterizer.viewport_depth_range).ToFloat32();
+    const f32 offset = f24::FromRaw(regs.rasterizer.viewport_depth_near_plane).ToFloat32();
+    // depth = offset - scale * z, with z from 0 to 1
+    const f32 min_depth = offset;
+    const f32 max_depth = offset - scale;
+    const auto fits = [](f32 depth) { return depth >= 0.f && depth <= 1.f; };
+    if (!fits(min_depth) || !fits(max_depth)) {
+        return std::nullopt;
+    }
+    return std::make_pair(min_depth, max_depth);
 }
 
 FSConfig::FSConfig(const Pica::RegsInternal& regs)
