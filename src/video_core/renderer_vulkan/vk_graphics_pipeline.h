@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <mutex>
+#include <unordered_map>
 #include "common/hash.h"
 #include "common/thread_worker.h"
 #include "video_core/pica/regs_pipeline.h"
@@ -314,12 +316,50 @@ struct Shader : public Common::AsyncHandle {
     std::string program;
 };
 
+/**
+ * The parts of graphics pipelines the driver compiles on their own with
+ * VK_EXT_graphics_pipeline_library. A vertex shader is compiled once for every pipeline it is in,
+ * and a pipeline whose vertex shader is known only costs its fragment shader.
+ */
+class PipelineLibraries {
+public:
+    explicit PipelineLibraries(const Instance& instance, RenderManager& renderpass_cache,
+                               vk::PipelineLayout layout);
+    ~PipelineLibraries();
+
+    /// Links a pipeline, building the parts it is missing. With only_ready a vertex shader that
+    /// isn't compiled yet makes it return a null handle instead
+    vk::UniquePipeline Link(const PipelineInfo& info, const std::array<Shader*, 3>& stages,
+                            vk::PipelineCache pipeline_cache, bool only_ready);
+
+private:
+    struct Library {
+        std::mutex mutex;
+        vk::UniquePipeline handle;
+    };
+
+    /// Returns the part with that key, building it with the given function if needed. With
+    /// only_ready a part that isn't built comes back null
+    template <typename Func>
+    vk::Pipeline Get(u64 key, bool only_ready, Func&& build);
+
+    vk::UniquePipeline Create(vk::GraphicsPipelineLibraryFlagsEXT part,
+                              vk::GraphicsPipelineCreateInfo create_info,
+                              vk::PipelineCache pipeline_cache);
+
+    const Instance& instance;
+    RenderManager& renderpass_cache;
+    vk::PipelineLayout pipeline_layout;
+    std::mutex mutex;
+    std::unordered_map<u64, std::unique_ptr<Library>> libraries;
+};
+
 class GraphicsPipeline : public Common::AsyncHandle {
 public:
     explicit GraphicsPipeline(const Instance& instance, RenderManager& renderpass_cache,
                               const PipelineInfo& info, vk::PipelineCache pipeline_cache,
                               vk::PipelineLayout layout, std::array<Shader*, 3> stages,
-                              Common::ThreadWorker* worker);
+                              Common::ThreadWorker* worker, PipelineLibraries* libraries);
     ~GraphicsPipeline();
 
     bool TryBuild(bool wait_built);
@@ -334,6 +374,7 @@ private:
     const Instance& instance;
     RenderManager& renderpass_cache;
     Common::ThreadWorker* worker;
+    PipelineLibraries* libraries;
 
     vk::UniquePipeline pipeline;
     vk::PipelineLayout pipeline_layout;

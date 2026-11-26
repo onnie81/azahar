@@ -129,6 +129,10 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     }
 
     BuildLayout();
+    if (instance.IsGraphicsPipelineLibrarySupported()) {
+        pipeline_libraries =
+            std::make_unique<PipelineLibraries>(instance, renderpass_cache, *pipeline_layout);
+    }
 }
 
 void PipelineCache::BuildLayout() {

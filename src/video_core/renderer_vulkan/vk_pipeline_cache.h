@@ -163,6 +163,8 @@ private:
     Pica::Shader::Profile profile{};
     vk::UniquePipelineCache driver_pipeline_cache;
     vk::UniquePipelineLayout pipeline_layout;
+    /// Null unless the driver builds pipelines from parts
+    std::unique_ptr<PipelineLibraries> pipeline_libraries;
     std::size_t num_worker_threads;
     Common::ThreadWorker pipeline_workers;
     Common::ThreadWorker shader_workers;
