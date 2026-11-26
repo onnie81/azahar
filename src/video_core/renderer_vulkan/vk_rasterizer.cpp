@@ -40,6 +40,21 @@ constexpr u64 TEXTURE_BUFFER_SIZE = 2_MiB;
 constexpr vk::BufferUsageFlags BUFFER_USAGE =
     vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eIndexBuffer;
 
+/// The part of a draw rectangle that the scissor test of the PICA keeps
+Common::Rectangle<u32> ClipToScissorTest(const Pica::RasterizerRegs& regs,
+                                         const Common::Rectangle<u32>& rect,
+                                         const Common::Rectangle<s32>& test) {
+    if (regs.scissor_test.mode != Pica::RasterizerRegs::ScissorMode::Include) {
+        return rect;
+    }
+    const s32 left = std::max(static_cast<s32>(rect.left), test.left);
+    const s32 bottom = std::max(static_cast<s32>(rect.bottom), test.bottom);
+    const s32 right = std::max(left, std::min(static_cast<s32>(rect.right), test.right));
+    const s32 top = std::max(bottom, std::min(static_cast<s32>(rect.top), test.top));
+    return Common::Rectangle<u32>{static_cast<u32>(left), static_cast<u32>(top),
+                                  static_cast<u32>(right), static_cast<u32>(bottom)};
+}
+
 struct DrawParams {
     u32 vertex_count;
     s32 vertex_offset;
@@ -628,7 +643,8 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
         viewport.x + viewport.width,
         viewport.y + viewport.height,
     };
-    pipeline_info.dynamic_info.scissor = draw_rect;
+    pipeline_info.dynamic_info.scissor =
+        ClipToScissorTest(regs.rasterizer, draw_rect, fb_helper.Scissor());
 
     // Draw the vertex batch
     bool succeeded = true;
