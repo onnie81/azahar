@@ -23,29 +23,40 @@ RenderManager::RenderManager(const Instance& instance, Scheduler& scheduler)
 
 RenderManager::~RenderManager() = default;
 
-void RenderManager::BeginRendering(const Framebuffer* framebuffer,
-                                   Common::Rectangle<u32> draw_rect) {
-    const vk::Rect2D render_area = {
-        .offset{
-            .x = static_cast<s32>(draw_rect.left),
-            .y = static_cast<s32>(draw_rect.bottom),
-        },
-        .extent{
-            .width = draw_rect.GetWidth(),
-            .height = draw_rect.GetHeight(),
-        },
-    };
+bool RenderManager::Covers(const Framebuffer* framebuffer) const {
+    if (!pass.render_pass || pass.do_clear || shadow_rendering || framebuffer->shadow_rendering ||
+        samples != framebuffer->Samples() || (!views[0] && !views[1])) {
+        return false;
+    }
+    const vk::ImageView color = framebuffer->ImageView(VideoCore::SurfaceType::Color);
+    const vk::ImageView depth = framebuffer->ImageView(VideoCore::SurfaceType::Depth);
+    return (!color || color == views[0]) && (!depth || depth == views[1]);
+}
+
+bool RenderManager::BeginRendering(const Framebuffer* framebuffer) {
+    if (Covers(framebuffer)) {
+        num_draws++;
+        return pass.framebuffer != framebuffer->Handle();
+    }
+
     const RenderPass new_pass = {
         .framebuffer = framebuffer->Handle(),
         .render_pass = framebuffer->RenderPass(),
-        .render_area = render_area,
+        // The whole target, for a draw with another viewport to stay in the pass
+        .render_area = vk::Rect2D{.offset = {0, 0}, .extent = framebuffer->Extent()},
         .clears = {},
         .do_clear = false,
     };
+    BeginRendering(new_pass);
     images = framebuffer->Images();
     aspects = framebuffer->Aspects();
     shadow_rendering = framebuffer->shadow_rendering;
-    BeginRendering(new_pass);
+    views = {framebuffer->ImageView(VideoCore::SurfaceType::Color),
+             framebuffer->ImageView(VideoCore::SurfaceType::Depth)};
+    formats = {framebuffer->Format(VideoCore::SurfaceType::Color),
+               framebuffer->Format(VideoCore::SurfaceType::Depth)};
+    samples = framebuffer->Samples();
+    return false;
 }
 
 void RenderManager::BeginRendering(const RenderPass& new_pass) {
@@ -130,6 +141,8 @@ void RenderManager::EndRendering() {
     images = {};
     aspects = {};
     shadow_rendering = false;
+    views = {};
+    formats = {VideoCore::PixelFormat::Invalid, VideoCore::PixelFormat::Invalid};
 
     // The Mali guide recommends flushing at the end of each major renderpass
     // Testing has shown this has a significant effect on rendering performance

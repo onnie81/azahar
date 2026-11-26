@@ -586,9 +586,29 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
         return true;
     }
 
-    pipeline_info.state.attachments.color = framebuffer->Format(SurfaceType::Color);
-    pipeline_info.state.attachments.depth = framebuffer->Format(SurfaceType::Depth);
-    pipeline_info.state.attachments.sample_count = framebuffer->Samples();
+    // A pass that is open on these attachments and one more goes on, and the draw leaves
+    // the one it did not ask for alone
+    const auto use_attachments = [&](bool of_open_pass) {
+        auto& attachments = pipeline_info.state.attachments;
+        attachments.color =
+            of_open_pass ? renderpass_cache.ColorFormat() : framebuffer->Format(SurfaceType::Color);
+        attachments.depth =
+            of_open_pass ? renderpass_cache.DepthFormat() : framebuffer->Format(SurfaceType::Depth);
+        attachments.sample_count = framebuffer->Samples();
+    };
+    const bool pass_covers = renderpass_cache.Covers(framebuffer);
+    use_attachments(pass_covers);
+    if (!using_color_fb) {
+        pipeline_info.state.blending.color_write_mask = 0;
+    }
+    if (!using_depth_fb) {
+        pipeline_info.state.depth_stencil.depth_test_enable.Assign(0);
+        pipeline_info.state.depth_stencil.depth_write_enable.Assign(0);
+        pipeline_info.state.depth_stencil.stencil_test_enable.Assign(0);
+    }
+    kept_color_view =
+        pass_covers && !using_color_fb ? renderpass_cache.ColorView() : vk::ImageView{};
+    kept_color_sampled = false;
 
     // Update scissor uniforms
     const auto [scissor_x1, scissor_y2, scissor_x2, scissor_y1] = fb_helper.Scissor();
@@ -605,6 +625,10 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
     // Sync and bind the texture surfaces
     SyncTextureUnits(framebuffer);
     SyncUtilityTextures(framebuffer);
+    if (kept_color_sampled) {
+        // The draw reads what the pass has drawn
+        renderpass_cache.EndRendering();
+    }
 
     // Sync and bind the shader
     pipeline_cache.UseFragmentShader(regs, user_config);
@@ -615,7 +639,7 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
     UploadUniforms(accelerate);
 
     // Begin rendering
-    renderpass_cache.BeginRendering(framebuffer, draw_rect);
+    use_attachments(renderpass_cache.BeginRendering(framebuffer));
 
     // Configure viewport and scissor
     const auto viewport = fb_helper.Viewport();
@@ -659,6 +683,12 @@ void RasterizerVulkan::SyncTextureUnits(const Framebuffer* framebuffer) {
         pica_textures[0].enabled && pica_textures[0].config.type == TextureType::ShadowCube;
     const auto texture_set = pipeline_cache.Acquire(use_cube_heap ? DescriptorHeapType::Texture
                                                                   : DescriptorHeapType::Texture);
+    if (kept_color_view && pica_textures[0].enabled) {
+        // Shadow and cube textures are not compared with the attachment the pass keeps
+        const TextureType type = pica_textures[0].config.type;
+        kept_color_sampled |= type == TextureType::Shadow2D || type == TextureType::ShadowCube ||
+                              type == TextureType::TextureCube;
+    }
 
     for (u32 texture_index = 0; texture_index < pica_textures.size(); ++texture_index) {
         const auto& texture = pica_textures[texture_index];
@@ -724,6 +754,7 @@ void RasterizerVulkan::SyncTextureUnits(const Framebuffer* framebuffer) {
         Sampler& sampler = res_cache.GetSampler(texture.config);
         const vk::ImageView color_view = framebuffer->ImageView(SurfaceType::Color);
         const bool is_feedback_loop = color_view == surface.FramebufferView();
+        kept_color_sampled |= kept_color_view && kept_color_view == surface.FramebufferView();
         const vk::ImageView texture_view =
             is_feedback_loop ? surface.CopyImageView() : surface.ImageView();
         update_queue.AddImageSampler(texture_set, texture_index, 0, texture_view, sampler.Handle());
@@ -748,6 +779,7 @@ void RasterizerVulkan::SyncUtilityTextures(const Framebuffer* framebuffer) {
         const auto shadow_texture = regs.texturing.GetTextures()[shadow_texture_unit];
         shadow_reading &= shadow_texture.enabled;
     }
+    kept_color_sampled |= shadow_reading && kept_color_view;
 
     const auto utility_set = pipeline_cache.Acquire(DescriptorHeapType::Utility);
 
