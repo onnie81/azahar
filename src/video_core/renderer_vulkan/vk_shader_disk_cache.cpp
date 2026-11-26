@@ -83,6 +83,9 @@ std::optional<std::pair<u64, Shader* const>> ShaderDiskCache::UseProgrammableVer
 
     PicaVSConfig config{regs, setup};
 
+    // Leaves the paths the game has switched off out of the shader
+    config.state.bool_uniforms = FoldBoolUniforms(setup);
+
     // Transfer vertex attributes to the VS config
     config.state.used_input_vertex_attributes = layout.attribute_count;
     for (u32 i = 0; i < layout.attribute_count; i++) {
