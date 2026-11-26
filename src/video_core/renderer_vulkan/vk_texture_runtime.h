@@ -5,6 +5,8 @@
 #pragma once
 
 #include <span>
+#include <unordered_set>
+#include <vector>
 #include "video_core/rasterizer_cache/framebuffer_base.h"
 #include "video_core/rasterizer_cache/rasterizer_cache_base.h"
 #include "video_core/rasterizer_cache/surface_base.h"
@@ -178,6 +180,8 @@ private:
     void ClearTextureWithRenderpass(Surface& surface, const VideoCore::TextureClear& clear);
 
 private:
+    /// The surfaces that took the storage format: one made again there has it from the start
+    std::unordered_set<u64> storage_surfaces;
     const Instance& instance;
     Scheduler& scheduler;
     RenderManager& renderpass_cache;
@@ -288,6 +292,14 @@ private:
     void DepthStencilDownload(const VideoCore::BufferTextureCopy& download,
                               const VideoCore::StagingData& staging);
 
+    /// Gives the images the format of the storage view, with what they hold
+    void MakeStorage();
+
+    /// What the runtime knows a surface that took the storage format by
+    u64 StorageKey() const noexcept {
+        return (static_cast<u64>(addr) << 32) | (static_cast<u64>(width) << 16) | height;
+    }
+
 public:
     TextureRuntime& runtime;
     const Instance& instance;
@@ -300,6 +312,10 @@ public:
     vk::UniqueImageView storage_view;
     bool is_framebuffer{};
     bool is_storage{};
+    /// Whether the images can have the storage view
+    bool storage_format{};
+    /// The images that MakeStorage replaced, kept for the commands that still use them
+    std::vector<Handle> retired;
 };
 
 class Framebuffer : public VideoCore::FramebufferParams {

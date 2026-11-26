@@ -775,7 +775,10 @@ Surface::Surface(TextureRuntime& runtime_, const VideoCore::SurfaceParams& param
         return;
     }
 
-    bool is_mutable = traits.native == vk::Format::eR8G8B8A8Unorm;
+    // The storage view is of another format. A surface that is not known to be a shadow source
+    // takes it when it is first asked for that view
+    bool is_mutable = True(flags & VideoCore::SurfaceFlagBits::ShadowSource) ||
+                      runtime.storage_surfaces.contains(StorageKey());
 
     if (True(flags & VideoCore::SurfaceFlagBits::ShadowSource) &&
         traits.native != vk::Format::eR8G8B8A8Unorm) {
@@ -815,6 +818,7 @@ Surface::Surface(TextureRuntime& runtime_, const VideoCore::SurfaceParams& param
     }
 
     const bool need_format_list = is_mutable && instance.IsImageFormatListSupported();
+    storage_format = is_mutable;
     handles[Type::Base].Create(width, height, levels, texture_type, format,
                                vk::SampleCountFlagBits::e1, usage, flags, traits.aspect,
                                need_format_list, DebugName(false));
@@ -1161,7 +1165,7 @@ void Surface::Download(const VideoCore::BufferTextureCopy& download,
 }
 
 void Surface::ScaleUp(u32 new_scale, u8 new_sample_count) {
-    const bool is_mutable = pixel_format == VideoCore::PixelFormat::RGBA8;
+    const bool is_mutable = storage_format;
 
     vk::ImageCreateFlags flags{};
     if (texture_type == VideoCore::TextureType::CubeMap) {
@@ -1264,31 +1268,12 @@ vk::PipelineStageFlags Surface::PipelineStageFlags() const noexcept {
                        : vk::PipelineStageFlagBits::eNone);
 }
 
-vk::ImageView Surface::CopyImageView() noexcept {
-    auto& copy_handle = handles[Type::Copy];
-    vk::ImageLayout copy_layout = vk::ImageLayout::eGeneral;
-    if (!copy_handle) {
-        vk::ImageCreateFlags flags{};
-        if (texture_type == VideoCore::TextureType::CubeMap) {
-            flags |= vk::ImageCreateFlagBits::eCubeCompatible;
-        }
-        copy_handle.Create(GetScaledWidth(), GetScaledHeight(), levels, texture_type, traits.native,
-                           vk::SampleCountFlagBits::e1, traits.usage, flags, traits.aspect, false);
-        copy_layout = vk::ImageLayout::eUndefined;
-    }
+namespace {
 
-    runtime.renderpass_cache.EndRendering();
-
-    const RecordParams params = {
-        .aspect = Aspect(),
-        .pipeline_flags = PipelineStageFlags(),
-        .src_access = AccessFlags(),
-        .src_image = Image(),
-        .dst_image = copy_handle.image,
-    };
-
-    scheduler.Record([params, copy_layout, levels = this->levels, width = GetScaledWidth(),
-                      height = GetScaledHeight()](vk::CommandBuffer cmdbuf) {
+/// Copies the levels of an image to another of its size
+void RecordCopy(Scheduler& scheduler, const RecordParams& params, vk::ImageLayout copy_layout,
+                u32 levels, u32 width, u32 height) {
+    scheduler.Record([params, copy_layout, levels, width, height](vk::CommandBuffer cmdbuf) {
         std::array pre_barriers = {
             vk::ImageMemoryBarrier{
                 .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
@@ -1364,8 +1349,69 @@ vk::ImageView Surface::CopyImageView() noexcept {
         cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, params.pipeline_flags,
                                vk::DependencyFlagBits::eByRegion, {}, {}, post_barriers);
     });
+}
+
+} // Anonymous namespace
+
+vk::ImageView Surface::CopyImageView() noexcept {
+    auto& copy_handle = handles[Type::Copy];
+    vk::ImageLayout copy_layout = vk::ImageLayout::eGeneral;
+    if (!copy_handle) {
+        vk::ImageCreateFlags flags{};
+        if (texture_type == VideoCore::TextureType::CubeMap) {
+            flags |= vk::ImageCreateFlagBits::eCubeCompatible;
+        }
+        copy_handle.Create(GetScaledWidth(), GetScaledHeight(), levels, texture_type, traits.native,
+                           vk::SampleCountFlagBits::e1, traits.usage, flags, traits.aspect, false);
+        copy_layout = vk::ImageLayout::eUndefined;
+    }
+
+    runtime.renderpass_cache.EndRendering();
+
+    const RecordParams params = {
+        .aspect = Aspect(),
+        .pipeline_flags = PipelineStageFlags(),
+        .src_access = AccessFlags(),
+        .src_image = Image(),
+        .dst_image = copy_handle.image,
+    };
+
+    RecordCopy(scheduler, params, copy_layout, levels, GetScaledWidth(), GetScaledHeight());
 
     return copy_handle.image_views[ViewType::Sample];
+}
+
+void Surface::MakeStorage() {
+    runtime.renderpass_cache.EndRendering();
+
+    vk::ImageCreateFlags flags = vk::ImageCreateFlagBits::eMutableFormat;
+    if (texture_type == VideoCore::TextureType::CubeMap) {
+        flags |= vk::ImageCreateFlagBits::eCubeCompatible;
+    }
+    const auto usage =
+        traits.usage | vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eStorage;
+    for (const Type type : {Type::Base, Type::Scaled}) {
+        Handle& handle = handles[type];
+        if (!handle) {
+            continue;
+        }
+        Handle old = std::move(handle);
+        handle.Create(old.width, old.height, old.levels, texture_type, traits.native,
+                      vk::SampleCountFlagBits::e1, usage, flags, traits.aspect,
+                      instance.IsImageFormatListSupported(), DebugName(type == Type::Scaled));
+        const RecordParams params = {
+            .aspect = Aspect(),
+            .pipeline_flags = PipelineStageFlags(),
+            .src_access = AccessFlags(),
+            .src_image = old.image,
+            .dst_image = handle.image,
+        };
+        RecordCopy(scheduler, params, vk::ImageLayout::eUndefined, old.levels, handle.width,
+                   handle.height);
+        retired.push_back(std::move(old));
+    }
+    storage_format = true;
+    runtime.storage_surfaces.insert(StorageKey());
 }
 
 vk::ImageView Surface::ImageView(ViewType view_type, Type type) noexcept {
@@ -1381,6 +1427,9 @@ vk::ImageView Surface::ImageView(ViewType view_type, Type type) noexcept {
                    "Creating a storage-view for format({}) which doesn't have storage-support!",
                    vk::to_string(traits.native));
         is_storage = true;
+        if (!storage_format) {
+            MakeStorage();
+        }
     }
     if (view_type == ViewType::Depth || view_type == ViewType::Stencil) {
         ASSERT(this->type == SurfaceType::DepthStencil);
@@ -1575,8 +1624,9 @@ Framebuffer::Framebuffer(TextureRuntime& runtime, const VideoCore::FramebufferPa
         height = extent.height;
         render_pass = renderpass_cache.GetRenderpass(PixelFormat::Invalid, PixelFormat::Invalid,
                                                      false, sample_count);
-        images[0] = color->Image();
+        // The view first: the surface may take other images for it
         image_views[0] = color->StorageView();
+        images[0] = color->Image();
         aspects[0] = vk::ImageAspectFlagBits::eColor;
     } else {
         if (color) {

@@ -2,6 +2,7 @@
 // Licensed under GPLv3 or any later version
 // Refer to the LICENSE.txt file included.
 
+#include <memory>
 #include "common/alignment.h"
 #include "common/literals.h"
 #include "common/logging/log.h"
@@ -559,6 +560,24 @@ void RasterizerVulkan::DrawTriangles() {
     Draw(false, false);
 }
 
+void RasterizerVulkan::RenewFramebuffer(Framebuffer* framebuffer) {
+    if (framebuffer->shadow_rendering || !framebuffer->color_id) {
+        return;
+    }
+    // A color surface that became a shadow map since has other images
+    Surface& color = res_cache.GetSurface(framebuffer->color_id);
+    if (framebuffer->Images()[0] == color.Image()) {
+        return;
+    }
+    Surface* depth = framebuffer->depth_id ? &res_cache.GetSurface(framebuffer->depth_id) : nullptr;
+    const VideoCore::FramebufferParams params = *framebuffer;
+    // Commands that are not submitted yet may use the framebuffer
+    renderpass_cache.EndRendering();
+    scheduler.Finish();
+    std::destroy_at(framebuffer);
+    std::construct_at(framebuffer, runtime, params, &color, depth);
+}
+
 bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
     MICROPROFILE_SCOPE(Vulkan_Drawing);
     SyncDrawState();
@@ -576,6 +595,7 @@ bool RasterizerVulkan::Draw(bool accelerate, bool is_indexed) {
          (has_stencil && pipeline_info.state.depth_stencil.stencil_test_enable));
 
     const auto fb_helper = res_cache.GetFramebufferSurfaces(using_color_fb, using_depth_fb);
+    RenewFramebuffer(fb_helper.Framebuffer());
     const Framebuffer* framebuffer = fb_helper.Framebuffer();
     if (!framebuffer->Handle()) {
         return true;
