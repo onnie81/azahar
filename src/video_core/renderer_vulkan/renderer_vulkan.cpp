@@ -890,7 +890,11 @@ void RendererVulkan::DrawSingleScreenStereo(u32 screen_id_l, u32 screen_id_r, fl
 
 void RendererVulkan::ApplySecondLayerOpacity(float alpha) {
     scheduler.Record([alpha](vk::CommandBuffer cmdbuf) {
+        // Turnip keeps the constants of an earlier pipeline without color attachments when the
+        // value set matches the last one, so another value goes first
+        const std::array<float, 4> other = {0.0f, 0.0f, 0.0f, alpha == 0.0f ? 1.0f : 0.0f};
         const std::array<float, 4> blend_constants = {0.0f, 0.0f, 0.0f, alpha};
+        cmdbuf.setBlendConstants(other.data());
         cmdbuf.setBlendConstants(blend_constants.data());
     });
 }
