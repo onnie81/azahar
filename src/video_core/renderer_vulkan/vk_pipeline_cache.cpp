@@ -461,7 +461,11 @@ bool PipelineCache::BindPipeline(PipelineInfo& info, bool wait_built) {
                       current_rasterization = current_info.state.rasterization,
                       current_depth_stencil = current_info.state.depth_stencil,
                       rasterization = info.state.rasterization,
-                      depth_stencil = info.state.depth_stencil](vk::CommandBuffer cmdbuf) {
+                      depth_stencil = info.state.depth_stencil,
+                      after_colorless =
+                          current_info.state.attachments.color == VideoCore::PixelFormat::Invalid &&
+                          info.state.attachments.color != VideoCore::PixelFormat::Invalid](
+                         vk::CommandBuffer cmdbuf) {
         if (dynamic.viewport != current_dynamic.viewport ||
             dynamic.min_depth != current_dynamic.min_depth ||
             dynamic.max_depth != current_dynamic.max_depth || is_dirty) {
@@ -505,8 +509,14 @@ bool PipelineCache::BindPipeline(PipelineInfo& info, bool wait_built) {
                                        dynamic.stencil_reference);
         }
 
-        if (dynamic.blend_color != current_dynamic.blend_color || is_dirty) {
+        if (dynamic.blend_color != current_dynamic.blend_color || is_dirty || after_colorless) {
             const Common::Vec4f color = PicaToVK::ColorRGBA8(dynamic.blend_color);
+            if (after_colorless) {
+                // Turnip keeps the constants of the pipeline without color attachments otherwise
+                Common::Vec4f other = color;
+                other.w = color.w == 0.0f ? 1.0f : 0.0f;
+                cmdbuf.setBlendConstants(other.AsArray());
+            }
             cmdbuf.setBlendConstants(color.AsArray());
         }
 
